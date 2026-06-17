@@ -1,0 +1,17 @@
+  services:
+    backend:
+      container_name: gofundbot
+      image: jianboy/gofundbot:latest
+      volumes:
+        - ./Data:/app/Data
+      ports:
+        - 5000:5000
+      restart: always
+
+  volumes:
+    db_data:
+
+
+  networks:
+    default:
+      driver: bridge

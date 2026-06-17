@@ -4,3 +4,5 @@ Data/funds.db
 __pycache__/
 *.pyc
 *.env
+Frontend/dist/
+Backend/static/

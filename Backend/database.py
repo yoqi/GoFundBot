@@ -6,7 +6,7 @@ from pathlib import Path
 # 获取当前文件所在目录（Backend/）
 BACKEND_DIR = Path(__file__).parent.resolve()
 # 项目根目录 = BACKEND_DIR 的父目录
-PROJECT_ROOT = BACKEND_DIR.parent
+PROJECT_ROOT = BACKEND_DIR
 # 数据库路径：PROJECT_ROOT / Data / funds.db
 DATABASE_PATH = PROJECT_ROOT / "Data" / "funds.db"
 
