@@ -18,7 +18,7 @@ import time
 import re
 import requests
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)  # 允许跨域请求
 
 # 注册市场数据 Blueprint
@@ -2439,6 +2439,18 @@ def preload_services():
 
 # 启动预加载（在应用启动时执行）
 preload_services()
+
+from flask import send_from_directory
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    """服务前端静态文件，SPA 路由支持"""
+    import os
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    if path and os.path.exists(os.path.join(static_dir, path)):
+        return send_from_directory(static_dir, path)
+    return send_from_directory(static_dir, 'index.html')
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
