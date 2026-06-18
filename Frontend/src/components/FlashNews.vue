@@ -30,6 +30,7 @@
       >
         <div class="news-header">
           <span class="news-time">{{ formatTime(news.publish_time) }}</span>
+          <span v-if="news.source" class="news-source">{{ news.source }}</span>
           <span 
             v-if="news.evaluate" 
             class="news-tag"
@@ -70,7 +71,7 @@ export default {
   props: {
     count: {
       type: Number,
-      default: 15
+      default: 30
     },
     autoRefresh: {
       type: Boolean,
@@ -78,7 +79,7 @@ export default {
     },
     refreshInterval: {
       type: Number,
-      default: 60000 // 默认1分钟刷新
+      default: 30000 // 默认30秒刷新
     }
   },
   setup(props) {
@@ -223,7 +224,7 @@ export default {
 
 .news-header {
   display: flex;
-  justify-content: space-between;
+  gap: 6px;
   align-items: center;
   margin-bottom: 6px;
 }
@@ -231,6 +232,16 @@ export default {
 .news-time {
   font-size: 12px;
   color: var(--text-secondary, #999);
+}
+
+.news-source {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #eef4ff;
+  color: #1677ff;
+  font-weight: 600;
 }
 
 .news-tag {

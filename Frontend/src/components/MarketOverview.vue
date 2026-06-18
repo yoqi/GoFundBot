@@ -31,11 +31,11 @@
         </button>
       </div>
 
-      <!-- A股 -->
+      <!-- 中国市场：A股 + 港股 -->
       <div class="market-sub-section">
-        <h4 class="sub-title"><span class="flag">🇨🇳</span> A股市场</h4>
-        <div class="index-grid" v-if="indices.aShare.length">
-          <div v-for="item in indices.aShare" :key="item.name" class="index-card" :class="getUpDnClass(item.change_pct)">
+        <h4 class="sub-title"><span class="flag">🇨🇳</span> 中国市场 <span class="sub-desc">A股 / 港股</span></h4>
+        <div class="index-grid china-grid" v-if="indices.china.length">
+          <div v-for="item in indices.china" :key="item.name" class="index-card" :class="getUpDnClass(item.change_pct)">
             <div class="index-name">{{ item.name }}</div>
             <div class="index-price">{{ item.price }}</div>
             <div class="index-change">{{ item.change_pct }}</div>
@@ -43,23 +43,11 @@
         </div>
       </div>
 
-      <!-- 港股 -->
+      <!-- 全球指数 -->
       <div class="market-sub-section">
-        <h4 class="sub-title"><span class="flag">🇭🇰</span> 港股市场</h4>
-        <div class="index-grid" v-if="indices.hkShare.length">
-          <div v-for="item in indices.hkShare" :key="item.name" class="index-card" :class="getUpDnClass(item.change_pct)">
-            <div class="index-name">{{ item.name }}</div>
-            <div class="index-price">{{ item.price }}</div>
-            <div class="index-change">{{ item.change_pct }}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 美股 -->
-      <div class="market-sub-section">
-        <h4 class="sub-title"><span class="flag">🇺🇸</span> 美股市场</h4>
-        <div class="index-grid" v-if="indices.usShare.length">
-          <div v-for="item in indices.usShare" :key="item.name" class="index-card" :class="getUpDnClass(item.change_pct)">
+        <h4 class="sub-title"><span class="flag">🌐</span> 全球指数</h4>
+        <div class="index-grid global-grid" v-if="indices.global.length">
+          <div v-for="item in indices.global" :key="item.name" class="index-card" :class="getUpDnClass(item.change_pct)">
             <div class="index-name">{{ item.name }}</div>
             <div class="index-price">{{ item.price }}</div>
             <div class="index-change">{{ item.change_pct }}</div>
@@ -183,10 +171,11 @@ export default {
     // 指数分组
     const indices = computed(() => {
       const all = marketIndex.value
+      const chinaNames = ['上证指数','深证成指','创业板指','科创50','沪深300','上证50','中证500','中小100','恒生指数','国企指数','恒生科技']
+      const globalNames = ['纳斯达克','纳斯达克100','道琼斯','标普500','日经225','韩国综合','英国富时100','德国DAX','法国CAC40','印度SENSEX']
       return {
-        aShare: all.filter(i => ['上证指数','深证成指','创业板指','科创50','沪深300','上证50','中证500','中小100'].some(n => i.name.includes(n))),
-        hkShare: all.filter(i => ['恒生'].some(n => i.name.includes(n)) || i.name === '国企指数'),
-        usShare: all.filter(i => ['纳斯达克','道琼斯','标普500'].some(n => i.name.includes(n)))
+        china: all.filter(i => i.market === 'A股' || i.market === '港股' || chinaNames.some(n => i.name.includes(n))),
+        global: all.filter(i => i.market === '全球' || i.market === '美股' || globalNames.some(n => i.name.includes(n)))
       }
     })
 
@@ -462,10 +451,24 @@ export default {
   gap: 6px;
 }
 
+.sub-desc {
+  color: #999;
+  font-size: 0.85em;
+  font-weight: normal;
+}
+
 .index-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
   gap: 12px;
+}
+
+.china-grid {
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+}
+
+.global-grid {
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
 }
 
 .index-card {

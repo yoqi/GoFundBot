@@ -11,6 +11,15 @@ class FundDataCleaner:
     def __init__(self):
         self.cleaned_data = {}
         self.stock_service = StockService()
+
+    def normalize_fund_code(self, value: Any) -> str:
+        """Return fund codes as six-character strings so leading zeroes survive."""
+        if value is None:
+            return ''
+        code = str(value).strip().strip('"').strip("'")
+        if re.match(r'^\d{1,6}$', code):
+            return code.zfill(6)
+        return code
     
     def clean_js_variable(self, value: str) -> Any:
         """清洗JavaScript变量值"""
@@ -135,7 +144,7 @@ class FundDataCleaner:
     
     def clean_fund_info(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """清洗基金基本信息"""
-        fund_code = self.clean_js_variable(raw_data.get('fS_code'))
+        fund_code = self.normalize_fund_code(raw_data.get('fS_code'))
         
         # 尝试从本地缓存中获取基金类型
         fund_type = raw_data.get('fund_type_from_cache')
@@ -285,6 +294,11 @@ class FundDataCleaner:
     
     def clean_all_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """清洗所有数据"""
+        if raw_data.get('fundcode') is not None:
+            raw_data['fundcode'] = self.normalize_fund_code(raw_data.get('fundcode'))
+        if raw_data.get('fS_code') is not None:
+            raw_data['fS_code'] = self.normalize_fund_code(raw_data.get('fS_code'))
+
         cleaned_data = {
             'basic_info': self.clean_fund_info(raw_data),
             'performance': self.clean_performance_data(raw_data),

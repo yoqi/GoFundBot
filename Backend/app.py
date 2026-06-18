@@ -51,6 +51,10 @@ def _json_loads(data, default):
     except Exception:
         return default
 
+def _normalize_fund_code(code):
+    code = str(code or '').strip()
+    return code.zfill(6) if re.match(r'^\d{1,6}$', code) else code
+
 def _build_cached_response(db: Session, fund_code: str):
     basic = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == fund_code).first()
     trend = db.query(FundTrend).filter(FundTrend.fund_code == fund_code).first()
@@ -146,6 +150,7 @@ def get_fund_detail(fund_code):
     - 同时更新所有相关表（FundBasicInfo, FundTrend, FundRiskMetrics等）
     - 确保详情、对比、筛选三个模块的数据源统一
     """
+    fund_code = _normalize_fund_code(fund_code)
     if not fund_code:
         return jsonify({"error": "Fund code is required"}), 400    
     db = get_db() # 获取数据库会话
@@ -361,6 +366,7 @@ def analyze_fund(fund_code):
     - 后市展望
     - 亮点与风险提示
     """
+    fund_code = _normalize_fund_code(fund_code)
     if not fund_code:
         return jsonify({"error": "Fund code is required"}), 400
     
@@ -385,6 +391,7 @@ def analyze_fund(fund_code):
 @app.route('/api/fund/<fund_code>/basic', methods=['GET'])
 def get_fund_basic(fund_code):
     """获取基金基础信息 实时调用API"""
+    fund_code = _normalize_fund_code(fund_code)
     if not fund_code:
         return jsonify({"error": "Fund code is required"}), 400
     fund_data = fund_api.get_fund_data(fund_code)
@@ -407,6 +414,7 @@ def get_fund_basic(fund_code):
 @app.route('/api/fund/<fund_code>/trend', methods=['GET'])
 def get_fund_trend(fund_code):
     """获取基金走势数据 实时调用API"""
+    fund_code = _normalize_fund_code(fund_code)
     if not fund_code:
         return jsonify({"error": "Fund code is required"}), 400
     
@@ -478,6 +486,7 @@ def get_watchlist():
 
 @app.route('/api/watchlist/<fund_code>', methods=['GET'])
 def check_watchlist(fund_code):
+    fund_code = _normalize_fund_code(fund_code)
     """检查基金是否在自选列表中"""
     db = get_db()
     exists = db.query(FundWatchlist).filter(FundWatchlist.fund_code == fund_code).first() is not None
@@ -488,7 +497,7 @@ def check_watchlist(fund_code):
 def add_to_watchlist():
     """添加基金到自选列表"""
     data = request.get_json()
-    fund_code = data.get('fund_code')
+    fund_code = _normalize_fund_code(data.get('fund_code'))
     fund_name = data.get('fund_name', '')
     fund_type = data.get('fund_type', '')
     group_id = data.get('group_id')  # 可选的分组ID
@@ -534,6 +543,7 @@ def add_to_watchlist():
 
 @app.route('/api/watchlist/<fund_code>', methods=['DELETE'])
 def remove_from_watchlist(fund_code):
+    fund_code = _normalize_fund_code(fund_code)
     """从自选列表移除基金"""
     db = get_db()
     
@@ -554,7 +564,7 @@ def remove_from_watchlist(fund_code):
 def batch_delete_from_watchlist():
     """批量删除自选基金"""
     data = request.get_json()
-    fund_codes = data.get('fund_codes', [])
+    fund_codes = [_normalize_fund_code(code) for code in data.get('fund_codes', [])]
     
     if not fund_codes:
         return jsonify({'error': 'Fund codes are required'}), 400
@@ -594,6 +604,7 @@ def reorder_watchlist():
     
     try:
         for index, fund_code in enumerate(order):
+            fund_code = _normalize_fund_code(fund_code)
             update_data = {'sort_order': index}
             if group_id is not None:
                 update_data['group_id'] = group_id if group_id > 0 else None
@@ -728,7 +739,7 @@ def reorder_groups():
 def move_fund_to_group():
     """移动基金到指定分组"""
     data = request.get_json()
-    fund_code = data.get('fund_code')
+    fund_code = _normalize_fund_code(data.get('fund_code'))
     group_id = data.get('group_id')  # None 或 0 表示移到未分组
     
     if not fund_code:
@@ -999,6 +1010,7 @@ def is_data_fresh(updated_time, days=7):
 
 @app.route('/api/fund/<fund_code>/compare-data', methods=['GET'])
 def get_fund_compare_data(fund_code):
+    fund_code = _normalize_fund_code(fund_code)
     """
     获取基金对比数据，优先使用数据库缓存（1周内）
     返回完整的基金详情数据和风险指标
@@ -1448,6 +1460,7 @@ screening_stop_flag = False
 
 
 def update_single_fund_data(fund_code, db):
+    fund_code = _normalize_fund_code(fund_code)
     """
     更新单只基金的完整数据（简化版）
     直接获取详情数据，更新所有相关表
@@ -1935,6 +1948,7 @@ def get_screening_strategies():
 
 @app.route('/api/screening/fund/<fund_code>', methods=['GET'])
 def get_screening_fund_detail(fund_code):
+    fund_code = _normalize_fund_code(fund_code)
     """获取单只基金的筛选详情数据（JOIN 查询）"""
     db = get_db()
     
@@ -1997,6 +2011,7 @@ def get_screening_fund_detail(fund_code):
 
 @app.route('/api/screening/update-single/<fund_code>', methods=['POST'])
 def update_single_fund(fund_code):
+    fund_code = _normalize_fund_code(fund_code)
     """更新单只基金数据"""
     db = get_db()
     
@@ -2011,6 +2026,7 @@ def update_single_fund(fund_code):
 
 @app.route('/api/fund/<fund_code>/data-versions', methods=['GET'])
 def get_fund_data_versions(fund_code):
+    fund_code = _normalize_fund_code(fund_code)
     """
     获取单只基金各数据源的版本时间
     用于前端检测数据一致性

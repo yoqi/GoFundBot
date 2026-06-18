@@ -13,6 +13,14 @@
         </div>
         <!-- 模式切换 -->
         <div class="header-right">
+          <button
+            v-if="canGoBack"
+            class="back-btn"
+            @click="goBack"
+            title="返回上一步"
+          >
+            ← 返回
+          </button>
           <div class="mode-switch">
             <button 
               class="mode-btn" 
@@ -24,21 +32,21 @@
             <button 
               class="mode-btn" 
               :class="{ active: viewMode === 'screening' }"
-              @click="viewMode = 'screening'"
+              @click="navigateToMode('screening')"
             >
               🔍 基金筛选
             </button>
             <button 
               class="mode-btn" 
               :class="{ active: viewMode === 'backtest' }"
-              @click="viewMode = 'backtest'"
+              @click="navigateToMode('backtest')"
             >
               💰 定投回测
             </button>
             <button 
               class="mode-btn" 
-              :class="{ active: viewMode === 'realtime' }"
-              @click="viewMode = 'portfolio'"
+              :class="{ active: viewMode === 'portfolio' }"
+              @click="navigateToMode('portfolio')"
             >
               📊 估值与持仓
             </button>
@@ -83,7 +91,7 @@
         
         <!-- 右侧：快讯 + 板块（显示详情/对比时隐藏） -->
         <aside class="dashboard-right" v-if="!showFullContent">
-          <FlashNews :count="15" :refreshInterval="60000" />
+          <FlashNews :count="30" :refreshInterval="30000" />
           <SectorRank :limit="50" :initialDisplay="12" />
         </aside>
       </div>
@@ -177,27 +185,76 @@ export default {
     const viewMode = ref('dashboard') // 默认显示市场大盘
     const compareFunds = ref([]) // 用于对比的基金列表
     const compareMode = ref(false) // 是否处于对比模式
+    const navStack = ref([])
     
     // 是否显示全宽内容（详情页或对比页时隐藏右侧栏）
     const showFullContent = computed(() => {
       return (compareMode.value && compareFunds.value.length >= 2) || 
              (selectedFundCode.value && !compareMode.value)
     })
+
+    const canGoBack = computed(() => navStack.value.length > 0)
+
+    const snapshotState = () => ({
+      selectedFundCode: selectedFundCode.value,
+      viewMode: viewMode.value,
+      compareMode: compareMode.value,
+      compareFunds: compareFunds.value.map(fund => ({ ...fund }))
+    })
+
+    const sameState = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
+    const pushCurrentState = () => {
+      const current = snapshotState()
+      const last = navStack.value[navStack.value.length - 1]
+      if (!last || !sameState(last, current)) {
+        navStack.value.push(current)
+        if (navStack.value.length > 30) navStack.value.shift()
+      }
+    }
+
+    const restoreState = (state) => {
+      selectedFundCode.value = state.selectedFundCode || ''
+      viewMode.value = state.viewMode || 'dashboard'
+      compareMode.value = !!state.compareMode
+      compareFunds.value = Array.isArray(state.compareFunds)
+        ? state.compareFunds.map(fund => ({ ...fund }))
+        : []
+    }
+
+    const goBack = () => {
+      const previous = navStack.value.pop()
+      if (previous) restoreState(previous)
+    }
+
+    const normalizeFundCode = (fundOrCode) => {
+      if (fundOrCode && typeof fundOrCode === 'object') {
+        return fundOrCode.CODE || fundOrCode.fund_code || fundOrCode.code || ''
+      }
+      return fundOrCode || ''
+    }
+
+    const navigateToMode = (mode) => {
+      if (viewMode.value === mode && !selectedFundCode.value && !compareMode.value) return
+      pushCurrentState()
+      viewMode.value = mode
+      compareMode.value = false
+      compareFunds.value = []
+    }
     
     const handleFundSelected = (fundOrCode) => {
       if (compareMode.value) return // 对比模式下不切换基金
-      if (fundOrCode && typeof fundOrCode === 'object') {
-        selectedFundCode.value = fundOrCode.CODE || fundOrCode.fund_code || fundOrCode.code
-      } else {
-        selectedFundCode.value = fundOrCode
-      }
+      const nextCode = normalizeFundCode(fundOrCode)
+      if (nextCode && nextCode !== selectedFundCode.value) pushCurrentState()
+      selectedFundCode.value = nextCode
     }
     
     // 顶部搜索框选中基金
     const handleHeaderSearch = (fundOrCode) => {
+      pushCurrentState()
       compareMode.value = false // 退出对比模式
       viewMode.value = 'dashboard' // 切换到市场大盘
-      handleFundSelected(fundOrCode)
+      selectedFundCode.value = normalizeFundCode(fundOrCode)
     }
     
     // 从仪表盘/自选点击基金
@@ -208,6 +265,7 @@ export default {
     
     // 切换对比模式
     const toggleCompareMode = () => {
+      pushCurrentState()
       compareMode.value = !compareMode.value
       if (!compareMode.value) {
         // 退出对比模式时清空对比列表
@@ -217,15 +275,17 @@ export default {
     
     // 从筛选页面查看基金详情
     const handleScreeningFundView = (fundCode) => {
+      pushCurrentState()
       selectedFundCode.value = fundCode
       viewMode.value = 'dashboard'
     }
 
     // 从估值卡片点击后跳转到基金详情（大盘页布局）
     const handleRealtimeFundView = (fundOrCode) => {
+      pushCurrentState()
       compareMode.value = false
       viewMode.value = 'dashboard'
-      handleFundSelected(fundOrCode)
+      selectedFundCode.value = normalizeFundCode(fundOrCode)
     }
     
     // 添加基金到对比列表
@@ -259,6 +319,9 @@ export default {
     
     // 重置到市场大盘（点击菜单栏"市场大盘"时）
     const resetToDashboard = () => {
+      if (viewMode.value !== 'dashboard' || selectedFundCode.value || compareMode.value) {
+        pushCurrentState()
+      }
       viewMode.value = 'dashboard'
       selectedFundCode.value = ''
       // 如果处于对比模式，也退出
@@ -286,6 +349,7 @@ export default {
       viewMode,
       compareFunds,
       compareMode,
+      canGoBack,
       handleFundSelected,
       handleHeaderSearch,
       handleDashboardFundView,
@@ -296,7 +360,9 @@ export default {
       handleClearCompare,
       toggleCompareMode,
       showFullContent,
-      resetToDashboard
+      resetToDashboard,
+      goBack,
+      navigateToMode
     }
   }
 }
@@ -446,6 +512,24 @@ export default {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 8px;
+}
+
+.back-btn {
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.back-btn:hover {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .mode-switch {

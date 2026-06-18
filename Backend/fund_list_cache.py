@@ -247,12 +247,14 @@ class FundListCache:
         if not keyword or not self.fund_list:
             return []
         
+        keyword = str(keyword).strip()
         keyword_lower = keyword.lower()
+        padded_keyword = keyword.zfill(6) if re.match(r'^\d{1,6}$', keyword) else keyword
         results = []
         
         for fund in self.fund_list:
             # 优先匹配代码（精确匹配开头）
-            if fund['CODE'].startswith(keyword):
+            if fund['CODE'].startswith(keyword) or fund['CODE'].startswith(padded_keyword):
                 results.append({**fund, '_score': 100})
                 continue
             

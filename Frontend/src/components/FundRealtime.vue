@@ -1,30 +1,8 @@
 <template>
   <div class="realtime-container">
     <div class="top-row">
-      <div class="search-box">
-        <input
-          v-model="searchTerm"
-          @input="handleSearchInput"
-          @focus="showDropdown = true"
-          @keyup.enter="performSearch"
-          placeholder="输入基金代码或名称搜索"
-          class="search-input"
-        />
-        <div v-if="showDropdown && searchResults.length > 0" class="search-dropdown-overlay" ref="dropdownRef">
-          <div
-            v-for="fund in searchResults"
-            :key="fund.CODE"
-            class="dropdown-item"
-            :class="{ selected: isSelected(fund.CODE) }"
-            @click="toggleSelectFund(fund)"
-          >
-            <span class="fund-code">{{ fund.CODE }}</span>
-            <span class="fund-name">{{ fund.NAME }}</span>
-          </div>
-        </div>
-      </div>
-      <button class="btn btn-primary" @click="batchAddFunds" :disabled="selectedFunds.length === 0">
-        添加基金
+      <button class="btn btn-primary add-fund-trigger" @click="openAddFundModal">
+        + 添加基金
       </button>
       <div class="sort-box">
         <select v-model="sortBy" class="select-sort">
@@ -37,13 +15,6 @@
       <button class="btn btn-blue" @click="exportData">导出数据</button>
       <label class="btn btn-green" for="import-file">导入数据</label>
       <input id="import-file" class="hidden-file" type="file" accept="application/json" @change="importData" />
-    </div>
-
-    <!-- Tags Row -->
-    <div class="selected-tags-row" v-if="selectedFunds.length > 0">
-      <span v-for="fund in selectedFunds" :key="fund.CODE" class="selected-tag" @click="toggleSelectFund(fund)">
-        {{ fund.NAME }} <span class="tag-close">x</span>
-      </span>
     </div>
 
     <!-- Overview Box -->
@@ -83,29 +54,26 @@
 
     <!-- Tabs -->
     <div class="content-tabs">
-      <div class="ctab" :class="{active: activeTab==='holding'}" @click="activeTab='holding'">
-        👜 持仓 <span class="badge" v-if="Object.keys(holdings).length">{{ Object.keys(holdings).length }}</span>
-      </div>
-      <div class="ctab" :class="{active: activeTab==='watch'}" @click="activeTab='watch'">
-        👁️ 自选 <span class="badge watch" v-if="funds.length">{{ funds.length }}</span>
+      <div class="ctab" :class="{active: activeTab==='all'}" @click="activeTab='all'">
+        👜 基金持仓
       </div>
       <div class="ctab" :class="{active: activeTab==='rebalance'}" @click="activeTab='rebalance'">⚖️ 再平衡管理</div>
       <div class="ctab" :class="{active: activeTab==='dividend'}" @click="activeTab='dividend'">📉 红利低波</div>
     </div>
 
     <!-- Card Grid -->
-    <div class="fund-grid">
+    <div class="fund-grid" v-if="displayFunds.length">
       <div v-for="fund in displayFunds" :key="fund.code" class="fund-item-card">
         <div class="card-head">
-          <div class="c-title">{{ fund.name }}</div>
+          <button class="c-title detail-link" @click.stop="openFundDetail(fund)" title="查看基金详情">{{ fund.name }}</button>
           <button class="btn-del" @click.stop="removeFund(fund.code)">删除</button>
         </div>
         <div class="c-tags">
-          <span>{{ fund.code }}</span>
+          <span class="tag code-tag">{{ fund.code }}</span>
           <span class="tag red" v-if="holdings[fund.code]">持仓</span>
           <span class="tag pink">场外</span>
         </div>
-        <div class="c-mid-tabs">
+        <div v-if="false" class="c-mid-tabs">
           <div
             class="c-tab"
             :class="{ active: true }"
@@ -122,9 +90,17 @@
         </div>
 
         <div class="c-hero">
-          <div class="hero-chip" :class="getChangeClass(fund.gszzl)">{{ formatChange(fund.gszzl) }}</div>
-          <div class="hero-chip" :class="getHoldingProfitTodayClass(fund)" v-if="holdings[fund.code]">
-            {{ getHoldingProfitToday(fund) >= 0 ? '+' : '' }}¥{{ getHoldingProfitToday(fund).toFixed(2) }}
+          <div class="hero-metric">
+            <div class="hero-chip" :class="getChangeClass(fund.gszzl)">{{ formatChange(fund.gszzl) }}</div>
+            <div class="hero-label">{{ getPriceStatusLabel(fund) }}涨跌</div>
+            <div class="hero-sub">单位净值 {{ fund.dwjz || '-' }}</div>
+          </div>
+          <div class="hero-metric" v-if="holdings[fund.code]">
+            <div class="hero-chip" :class="getHoldingProfitTodayClass(fund)">
+              {{ getHoldingProfitToday(fund) >= 0 ? '+' : '' }}¥{{ getHoldingProfitToday(fund).toFixed(2) }}
+            </div>
+            <div class="hero-label">{{ getPriceStatusLabel(fund) }}盈亏</div>
+            <div class="hero-sub">{{ hasFreshEstimate(fund) ? '估算值' : '最新净值' }} {{ formatGsz(fund) }}</div>
           </div>
         </div>
 
@@ -162,7 +138,7 @@
             <div class="grid-box">
               <div class="g-label">收益率</div>
               <div class="g-val" :class="getHoldingProfitTotalClass(fund)">
-                {{ getHoldingAmount(fund) > 0 ? ((getHoldingProfitTotal(fund) / getHoldingAmount(fund)) * 100 >= 0 ? '+' : '') + ((getHoldingProfitTotal(fund) / getHoldingAmount(fund)) * 100).toFixed(2) + '%' : '0.00%' }}
+                {{ getHoldingCostAmount(fund) > 0 ? ((getHoldingProfitTotal(fund) / getHoldingCostAmount(fund)) * 100 >= 0 ? '+' : '') + ((getHoldingProfitTotal(fund) / getHoldingCostAmount(fund)) * 100).toFixed(2) + '%' : '0.00%' }}
               </div>
             </div>
           </div>
@@ -171,19 +147,8 @@
           </div>
         </div>
 
-        <div class="c-bottom-nav">
-          <div class="bn-col">
-            <div class="bn-label">单位净值</div>
-            <div class="bn-val">{{ fund.dwjz || '-' }}</div>
-          </div>
-          <div class="bn-col">
-            <div class="bn-label">估算值</div>
-            <div class="bn-val" :class="getChangeClass(fund.gszzl)">{{ formatGsz(fund) }}</div>
-          </div>
-        </div>
-
         <div class="c-chart">
-          <svg v-if="getFundMiniChart3m(fund).points.length > 1" viewBox="0 0 110 46" preserveAspectRatio="none" class="c-svg">
+          <svg v-if="getFundMiniChart3m(fund).points.length > 1" viewBox="0 0 110 64" preserveAspectRatio="none" class="c-svg">
             <line class="c-axis" x1="20" y1="28" x2="106" y2="28"></line>
             <line class="c-axis" x1="20" y1="4" x2="20" y2="28"></line>
             <line
@@ -198,7 +163,7 @@
             <path
               class="c-fill"
               :class="getFundMiniChart3m(fund).trendUp ? 'up' : 'down'"
-              :d="getSparklineFill(getFundMiniChart3m(fund).points, 28)"
+              :d="getSparklineFill(getFundMiniChart3m(fund).points, 48)"
             ></path>
             <path
               class="c-line"
@@ -218,7 +183,7 @@
               :key="`x-${fund.code}-${tick.x}`"
               class="c-x-label"
               :x="tick.x"
-              y="35"
+              y="55"
               text-anchor="middle"
             >{{ tick.label }}</text>
           </svg>
@@ -230,36 +195,103 @@
         </div>
       </div>
     </div>
+    <div v-else class="portfolio-empty">
+      <div class="portfolio-empty-icon">📌</div>
+      <div class="portfolio-empty-title">{{ emptyTitle }}</div>
+      <div class="portfolio-empty-hint">{{ emptyHint }}</div>
+      <button class="btn btn-primary" @click="openAddFundModal">+ 添加基金</button>
+    </div>
     
 <!-- Modals retained -->
+    <div v-if="addFundModalOpen" class="modal-overlay" @click.self="closeAddFundModal">
+      <div class="modal-box add-fund-modal">
+        <div class="modal-title-row">
+          <h3>添加基金</h3>
+          <button class="modal-close" @click="closeAddFundModal" aria-label="关闭">×</button>
+        </div>
+
+        <div class="add-search-box">
+          <input
+            v-model="searchTerm"
+            @input="handleSearchInput"
+            @keyup.enter="confirmAddFund"
+            placeholder="输入基金名称或代码"
+            class="modal-input add-search-input"
+            autofocus
+          />
+        </div>
+
+        <div v-if="searchLoading" class="add-loading">搜索中...</div>
+        <div v-else-if="searchResults.length > 0" class="add-result-list">
+          <button
+            v-for="fund in searchResults"
+            :key="fund.CODE"
+            class="add-result-item"
+            :class="{ selected: isSelected(fund.CODE) }"
+            @click="selectFundForAdd(fund)"
+          >
+            <span class="fund-code">{{ fund.CODE }}</span>
+            <span class="fund-name">{{ fund.NAME }}</span>
+          </button>
+        </div>
+        <div v-else-if="searchTerm" class="add-empty">未找到匹配基金</div>
+        <div v-else class="add-empty">输入基金名称、简称或 6 位代码后选择基金</div>
+
+        <div class="modal-actions">
+          <button class="btn" @click="closeAddFundModal">取消</button>
+          <button class="btn btn-primary" @click="confirmAddFund" :disabled="refreshing || (!selectedFunds.length && !searchTerm)">
+            确定添加
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="holdingModal.open" class="modal-overlay" @click.self="closeHoldingModal">
-      <div class="modal-box">
-        <div class="modal-tabs elegant-tabs">
+      <div class="modal-box holding-modal">
+        <div class="modal-title-row holding-title-row">
+          <div>
+            <div class="modal-kicker">持仓管理</div>
+            <h3>{{ modalTab === 'set' ? '设置持仓' : '加减仓' }}</h3>
+          </div>
+          <button class="modal-close" @click="closeHoldingModal" aria-label="关闭">×</button>
+        </div>
+
+        <div class="modal-tabs elegant-tabs holding-tabs">
           <button class="modal-tab" :class="{ active: modalTab === 'set' }" @click="modalTab = 'set'">设置持仓</button>
           <button class="modal-tab" :class="{ active: modalTab === 'trade' }" @click="modalTab = 'trade'">加减仓</button>
         </div>
-        <div class="fund-modal-info">
-          <span class="fund-name">{{ holdingModal.fund?.name }}</span>
-          <span class="fund-code">#{{ holdingModal.fund?.code }}</span>
+
+        <div class="fund-modal-info holding-summary-card">
+          <div class="fund-summary-main">
+            <span class="fund-name">{{ holdingModal.fund?.name }}</span>
+            <span class="fund-code">#{{ holdingModal.fund?.code }}</span>
+          </div>
           <div class="fund-nav-info">
-            <span>上一交易日净值：</span>
-            <span class="nav-value">{{ holdingModal.fund?.dwjz || '-' }}</span>
-            <span class="nav-date" v-if="holdingModal.fund?.jzrq">（{{ holdingModal.fund.jzrq }}）</span>
+            <div>
+              <span class="nav-label">上一交易日净值</span>
+              <span class="nav-value">{{ holdingModal.fund?.dwjz || '-' }}</span>
+            </div>
+            <span class="nav-date" v-if="holdingModal.fund?.jzrq">{{ holdingModal.fund.jzrq }}</span>
           </div>
         </div>
 
-        <div v-if="modalTab === 'set'">
-          <div class="form-group">
+        <div v-if="modalTab === 'set'" class="set-holding-form">
+          <div class="form-group elegant-input-group">
             <label>持有金额 (元)</label>
-            <input v-model.number="holdingForm.amount" type="number" step="any" placeholder="请输入持有金额" class="modal-input" />
+            <div class="input-wrapper">
+              <span class="prefix">¥</span>
+              <input v-model.number="holdingForm.amount" type="number" step="any" placeholder="请输入当前持有金额" class="modal-input no-border highlight" />
+            </div>
           </div>
-          <div class="form-group">
+          <div class="form-group elegant-input-group">
             <label>买入日期</label>
-            <input v-model="holdingForm.buyDate" type="date" class="modal-input" :max="todayDate" />
+            <div class="input-wrapper date-wrapper">
+              <input v-model="holdingForm.buyDate" type="date" class="modal-input no-border" :max="todayDate" />
+            </div>
           </div>
-          <div class="modal-actions">
-            <button class="btn" @click="closeHoldingModal">取消</button>
-            <button class="btn btn-green" @click="saveHolding" :disabled="!holdingForm.amount">保存</button>
+          <div class="modal-actions elegant-actions">
+            <button class="elegant-btn-cancel" @click="closeHoldingModal">取消</button>
+            <button class="elegant-btn-confirm buy" @click="saveHolding" :disabled="!holdingForm.amount">保存</button>
           </div>
         </div>
 
@@ -348,10 +380,11 @@ export default {
     const searchResults = ref([])
     const selectedFunds = ref([])
     const showDropdown = ref(false)
+    const addFundModalOpen = ref(false)
     const username = ref('guest')
     const nowTime = ref('--:--')
     const sortBy = ref('changeDesc')
-    const activeTab = ref('holding')
+    const activeTab = ref('all')
     const dropdownRef = ref(null)
     const searchPanelRef = ref(null)
     const searchTimeoutRef = ref(null)
@@ -396,13 +429,7 @@ export default {
     })
 
     const displayFunds = computed(() => {
-      if (activeTab.value === 'watch') return sortedFunds.value
-      if (activeTab.value === 'holding') {
-        return sortedFunds.value.filter(f => {
-          const h = holdings.value[f.code]
-          return !!(h && h.share > 0)
-        })
-      }
+      if (activeTab.value === 'all') return sortedFunds.value
       if (activeTab.value === 'rebalance') {
         return sortedFunds.value.filter(f => {
           const h = holdings.value[f.code]
@@ -422,14 +449,13 @@ export default {
     const emptyTitle = computed(() => {
       if (activeTab.value === 'rebalance') return '暂无需要再平衡的基金'
       if (activeTab.value === 'dividend') return '暂无匹配“红利低波”主题的基金'
-      return '暂无监控基金'
+      return '暂无基金'
     })
 
     const emptyHint = computed(() => {
-      if (activeTab.value === 'holding') return '请先添加基金并录入持仓金额'
       if (activeTab.value === 'rebalance') return '当前持仓波动处于合理范围'
       if (activeTab.value === 'dividend') return '请添加名称包含“红利 / 低波 / 股息”等关键词基金'
-      return '在上方搜索框中添加基金开始监控'
+      return '点击添加基金后，搜索基金名称或代码即可加入持仓列表'
     })
 
     const hasHoldings = computed(() => {
@@ -474,7 +500,10 @@ export default {
     const totalCost = computed(() => {
       let total = 0
       funds.value.forEach(fund => {
-        total += getHoldingAmount(fund)
+        const h = holdings.value[fund.code]
+        if (h && h.share && h.cost) {
+          total += h.share * h.cost
+        }
       })
       return total
     })
@@ -489,19 +518,25 @@ export default {
       return (totalProfitToday.value / totalCost.value) * 100
     })
 
-    const profitTodayClass = computed(() => totalProfitToday.value >= 0 ? 'up' : 'down')
-    const profitTotalClass = computed(() => totalProfitTotal.value >= 0 ? 'up' : 'down')
+    const getValueClass = (val) => {
+      const num = typeof val === 'number' ? val : parseFloat(val)
+      if (!Number.isFinite(num)) return ''
+      return num > 0 ? 'up' : num < 0 ? 'down' : 'flat'
+    }
+
+    const profitTodayClass = computed(() => getValueClass(totalProfitToday.value))
+    const profitTotalClass = computed(() => getValueClass(totalProfitTotal.value))
 
     // ==================== 方法 ====================
     const getChangeClass = (val) => {
       const num = typeof val === 'number' ? val : parseFloat(val)
-      if (isNaN(num)) return ''
-      return num > 0 ? 'up' : num < 0 ? 'down' : ''
+      if (!Number.isFinite(num)) return ''
+      return getValueClass(num)
     }
 
     const formatGsz = (fund) => {
-      const gsz = fund.gsz || fund.dwjz
-      return gsz ? parseFloat(gsz).toFixed(4) : '-'
+      const price = getCurrentPrice(fund)
+      return price ? price.toFixed(4) : '-'
     }
 
     const formatChange = (val) => {
@@ -510,19 +545,55 @@ export default {
       return (num >= 0 ? '+' : '') + num.toFixed(2) + '%'
     }
 
-    // 持有金额 = 上一交易日净值 × 份额（实际金额）
+    const getDateText = (value) => {
+      if (!value) return ''
+      const text = String(value)
+      const matched = text.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/)
+      return matched ? matched[0].replace(/\//g, '-') : ''
+    }
+
+    const hasFreshEstimate = (fund) => {
+      const estimate = Number(fund?.gsz)
+      if (!Number.isFinite(estimate) || estimate <= 0) return false
+      const estimateDate = getDateText(fund?.gztime)
+      const navDate = getDateText(fund?.jzrq)
+      return !!estimateDate && !!navDate && estimateDate > navDate
+    }
+
+    const getCurrentPrice = (fund) => {
+      const estimate = parseFloat(fund?.gsz)
+      if (hasFreshEstimate(fund) && Number.isFinite(estimate) && estimate > 0) return estimate
+      const nav = parseFloat(fund?.dwjz)
+      return Number.isFinite(nav) && nav > 0 ? nav : 0
+    }
+
+    const getPriceStatusLabel = (fund) => hasFreshEstimate(fund) ? '当日估值' : '已更新净值'
+
+    const getPreviousPrice = (fund) => {
+      if (hasFreshEstimate(fund)) {
+        const nav = parseFloat(fund?.dwjz)
+        return Number.isFinite(nav) && nav > 0 ? nav : 0
+      }
+      const prev = parseFloat(fund?.prevDwjz)
+      if (Number.isFinite(prev) && prev > 0) return prev
+      const nav = parseFloat(fund?.dwjz)
+      return Number.isFinite(nav) && nav > 0 ? nav : 0
+    }
+
+    // 持仓成本 = 平均成本 × 份额
     const getHoldingAmount = (fund) => {
       const h = holdings.value[fund.code]
-      if (!h || !h.share) return 0
-      const nav = parseFloat(fund.dwjz) || 0
-      return h.share * nav
+      if (!h || !h.share || !h.cost) return 0
+      return h.share * h.cost
     }
+
+    const getHoldingCostAmount = (fund) => getHoldingAmount(fund)
 
     // 估算金额 = 估算净值 × 份额
     const getHoldingEstimatedAmount = (fund) => {
       const h = holdings.value[fund.code]
       if (!h || !h.share) return 0
-      const nav = parseFloat(fund.gsz) || parseFloat(fund.dwjz) || 0
+      const nav = getCurrentPrice(fund)
       return h.share * nav
     }
 
@@ -530,20 +601,20 @@ export default {
     const getHoldingProfitToday = (fund) => {
       const h = holdings.value[fund.code]
       if (!h || !h.share) return 0
-      const gsz = parseFloat(fund.gsz) || parseFloat(fund.dwjz) || 0
-      const dwjz = parseFloat(fund.dwjz) || 0
+      const gsz = getCurrentPrice(fund)
+      const dwjz = getPreviousPrice(fund)
       return h.share * (gsz - dwjz)
     }
 
     const getHoldingProfitTotal = (fund) => {
       const h = holdings.value[fund.code]
       if (!h || !h.share || !h.cost) return 0
-      const nav = parseFloat(fund.gsz) || parseFloat(fund.dwjz) || 0
+      const nav = getCurrentPrice(fund)
       return (nav - h.cost) * h.share
     }
 
-    const getHoldingProfitTodayClass = (fund) => getHoldingProfitToday(fund) >= 0 ? 'up' : 'down'
-    const getHoldingProfitTotalClass = (fund) => getHoldingProfitTotal(fund) >= 0 ? 'up' : 'down'
+    const getHoldingProfitTodayClass = (fund) => getValueClass(getHoldingProfitToday(fund))
+    const getHoldingProfitTotalClass = (fund) => getValueClass(getHoldingProfitTotal(fund))
 
     // 根据金额和净值计算份额
     const calculateShare = (amount, nav) => {
@@ -566,17 +637,28 @@ export default {
 
     const isSelected = (code) => selectedFunds.value.some(f => f.CODE === code)
 
+    const openAddFundModal = () => {
+      addFundModalOpen.value = true
+      searchTerm.value = ''
+      searchResults.value = []
+      selectedFunds.value = []
+      showDropdown.value = false
+    }
+
+    const closeAddFundModal = () => {
+      addFundModalOpen.value = false
+      searchTerm.value = ''
+      searchResults.value = []
+      selectedFunds.value = []
+      showDropdown.value = false
+    }
+
+    const selectFundForAdd = (fund) => {
+      selectedFunds.value = [fund]
+    }
+
     const toggleSelectFund = (fund) => {
-      const exists = selectedFunds.value.find(f => f.CODE === fund.CODE)
-      if (exists) {
-        selectedFunds.value = selectedFunds.value.filter(f => f.CODE !== fund.CODE)
-      } else {
-        selectedFunds.value = [...selectedFunds.value, fund]
-        // 选中后自动清空
-        searchTerm.value = ''
-        searchResults.value = []
-        showDropdown.value = false
-      }
+      selectFundForAdd(fund)
     }
 
     const mapPortfolioHoldings = (portfolio = {}) => {
@@ -605,16 +687,44 @@ export default {
       const realtime = detail?.realtime_estimate || {}
       const basic = detail?.basic_info || {}
       const changeNum = Number(realtime.estimate_change)
+      const trend = Array.isArray(detail?.net_worth_trend) ? detail.net_worth_trend : []
+      const trendNavPoints = trend
+        .map(item => {
+          const nav = Number(item?.net_worth ?? item?.y ?? item?.value)
+          let date = item?.date ? String(item.date).slice(0, 10) : ''
+          if (!date && item?.x) {
+            const ts = Number(item.x)
+            if (Number.isFinite(ts)) date = new Date(ts).toISOString().slice(0, 10)
+          }
+          return Number.isFinite(nav) && nav > 0 && date ? { date, nav } : null
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.date.localeCompare(b.date))
+      const latestTrendNav = trendNavPoints[trendNavPoints.length - 1]
+      const previousTrendNav = trendNavPoints[trendNavPoints.length - 2]
+      const realtimeNavDate = getDateText(realtime.net_worth_date)
+      const latestOfficialNav = latestTrendNav && (!realtimeNavDate || latestTrendNav.date >= realtimeNavDate)
+        ? latestTrendNav
+        : null
+      const effectiveNavDate = latestOfficialNav?.date || realtimeNavDate
+      const realtimeEstimateDate = getDateText(realtime.estimate_time)
+      const shouldUseEstimateChange = !!realtimeEstimateDate && !!effectiveNavDate && realtimeEstimateDate > effectiveNavDate
+      const officialChange = latestOfficialNav && previousTrendNav?.nav
+        ? ((latestOfficialNav.nav - previousTrendNav.nav) / previousTrendNav.nav) * 100
+        : null
       return {
         code: realtime.fund_code || basic.fund_code || fallbackCode,
         name: realtime.name || basic.fund_name || fallbackCode,
-        dwjz: realtime.net_worth,
+        dwjz: latestOfficialNav ? String(latestOfficialNav.nav) : realtime.net_worth,
+        prevDwjz: previousTrendNav?.nav ? String(previousTrendNav.nav) : realtime.net_worth,
         gsz: realtime.estimate_value,
         gztime: realtime.estimate_time,
-        jzrq: realtime.net_worth_date,
-        gszzl: Number.isFinite(changeNum) ? changeNum : 0,
+        jzrq: latestOfficialNav ? latestOfficialNav.date : realtime.net_worth_date,
+        gszzl: !shouldUseEstimateChange && latestOfficialNav && Number.isFinite(officialChange)
+          ? officialChange
+          : (Number.isFinite(changeNum) ? changeNum : 0),
         holdings: mapPortfolioHoldings(detail?.portfolio),
-        netWorthTrend: Array.isArray(detail?.net_worth_trend) ? detail.net_worth_trend : [],
+        netWorthTrend: trend,
         totalReturnTrend: Array.isArray(detail?.total_return_trend) ? detail.total_return_trend : []
       }
     }
@@ -751,8 +861,8 @@ export default {
 
       const plotLeft = 20
       const plotRight = 106
-      const plotTop = 4
-      const plotBottom = 28
+      const plotTop = 5
+      const plotBottom = 48
       const plotW = plotRight - plotLeft
       const plotH = plotBottom - plotTop
 
@@ -812,7 +922,8 @@ export default {
       try {
         searchLoading.value = true
         const res = await fundAPI.searchFunds(keyword)
-        const list = res?.data?.data || []
+        const payload = res?.data?.data
+        const list = Array.isArray(payload) ? payload : (payload?.funds || [])
         searchResults.value = list.map(item => ({
           CODE: item.fund_code || item.CODE || item.code,
           NAME: item.fund_name || item.NAME || item.name
@@ -876,6 +987,44 @@ export default {
       }
     }
 
+    const pickSearchCandidate = () => {
+      const keyword = String(searchTerm.value || '').trim()
+      if (selectedFunds.value[0]) return selectedFunds.value[0]
+      if (/^\d{6}$/.test(keyword)) {
+        const exact = searchResults.value.find(item => item.CODE === keyword)
+        if (exact) return exact
+      }
+      return searchResults.value.length === 1 ? searchResults.value[0] : null
+    }
+
+    const confirmAddFund = async () => {
+      if (!selectedFunds.value.length && String(searchTerm.value || '').trim()) {
+        await performSearch()
+      }
+
+      const fund = pickSearchCandidate()
+      if (!fund?.CODE) return
+
+      activeTab.value = 'all'
+      if (funds.value.some(existing => existing.code === fund.CODE)) {
+        closeAddFundModal()
+        return
+      }
+
+      refreshing.value = true
+      try {
+        const data = await fetchFundData(fund.CODE)
+        const updated = [data, ...funds.value]
+        funds.value = updated
+        localStorage.setItem('realtime_funds', JSON.stringify(updated))
+        closeAddFundModal()
+      } catch (e) {
+        console.error(`添加基金 ${fund.CODE} 失败`, e)
+      } finally {
+        refreshing.value = false
+      }
+    }
+
     // 批量添加基金
     const batchAddFunds = async () => {
       // 允许直接输入6位代码后点“添加基金”
@@ -908,7 +1057,7 @@ export default {
         searchTerm.value = ''
         searchResults.value = []
         showDropdown.value = false
-        activeTab.value = 'watch'
+        activeTab.value = 'all'
       } catch (e) {
         console.error('批量添加失败', e)
       } finally {
@@ -947,8 +1096,8 @@ export default {
     const removeFund = (code) => {
       funds.value = funds.value.filter(f => f.code !== code)
       localStorage.setItem('realtime_funds', JSON.stringify(funds.value))
-      if (activeTab.value !== 'watch' && displayFunds.value.length === 0) {
-        activeTab.value = 'watch'
+      if (activeTab.value !== 'all' && displayFunds.value.length === 0) {
+        activeTab.value = 'all'
       }
     }
 
@@ -1202,6 +1351,7 @@ export default {
       searchTerm,
       searchResults,
       selectedFunds,
+      addFundModalOpen,
       username,
       nowTime,
       sortBy,
@@ -1234,14 +1384,19 @@ export default {
       formatGsz,
       formatChange,
       getHoldingAmount,
+      getHoldingCostAmount,
       getHoldingEstimatedAmount,
       getHoldingProfitToday,
       getHoldingProfitTotal,
       getHoldingProfitTodayClass,
       getHoldingProfitTotalClass,
+      getPriceStatusLabel,
       toggleCollapse,
       isSelected,
       toggleSelectFund,
+      openAddFundModal,
+      closeAddFundModal,
+      selectFundForAdd,
       getFundNavByDate,
       getFundSparklinePoints,
       getFundSparklinePoints3m,
@@ -1250,7 +1405,9 @@ export default {
       getSparklinePath,
       getSparklineFill,
       openFundDetail,
+      hasFreshEstimate,
       handleSearchInput,
+      confirmAddFund,
       batchAddFunds,
       refreshAll,
       removeFund,
@@ -1281,11 +1438,18 @@ export default {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
   background: #fff;
   padding: 12px 16px;
   border-radius: 8px;
   margin-bottom: 12px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+.add-fund-trigger {
+  font-weight: 700;
+}
+.sort-box {
+  margin-left: auto;
 }
 .search-box {
   flex: 1;
@@ -1332,18 +1496,68 @@ export default {
 .overview-cell.purple .cell-label { color: #eee; }
 .cell-val { font-size: 18px; font-weight: bold; }
 .overview-cell.purple .cell-val { color: #fff; }
+.cell-val.flat { color: #1677ff; }
 
 .content-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
 .ctab { padding: 6px 12px; background: #eee; border-radius: 16px; font-size: 14px; cursor: pointer; }
 .ctab.active { background: #fff; color: #1677ff; font-weight: bold; }
 
 .fund-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.portfolio-empty {
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: #fff;
+  border: 1px dashed #d0d7e2;
+  border-radius: 10px;
+  color: #667085;
+  text-align: center;
+}
+.portfolio-empty-icon {
+  font-size: 34px;
+}
+.portfolio-empty-title {
+  color: #1f2937;
+  font-size: 16px;
+  font-weight: 800;
+}
+.portfolio-empty-hint {
+  max-width: 360px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
 .fund-item-card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
-.card-head { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.card-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .c-title { font-weight: bold; font-size: 15px; }
+.detail-link {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: #1f2937;
+  cursor: pointer;
+  text-align: left;
+  line-height: 1.35;
+  text-decoration: underline;
+  text-decoration-color: rgba(22, 119, 255, 0.35);
+  text-underline-offset: 5px;
+}
+.detail-link:hover {
+  color: #1677ff;
+  text-decoration-color: #1677ff;
+}
 .btn-del { background: #ff4d4f; color: #fff; border: none; padding: 2px 8px; border-radius: 4px; font-size: 12px; cursor: pointer;}
-.c-tags { display: flex; gap: 8px; font-size: 12px; color: #666; margin-bottom: 12px; }
+.c-tags { display: flex; gap: 8px; font-size: 12px; color: #666; margin-bottom: 16px; }
 .tag { padding: 2px 6px; border-radius: 4px; color: white;}
+.tag.code-tag {
+  background: #f3f4f6;
+  color: #4b5563;
+  border: 1px solid #e5e7eb;
+  font-weight: 700;
+}
 .tag.red { background: #ff4d4f; }
 .tag.pink { background: #eb2f96; }
 
@@ -1352,10 +1566,27 @@ export default {
 .c-tab.active { color: #1677ff; border-bottom: 2px solid #1677ff; }
 .c-tab:hover { color: #1677ff; background: #f7fbff; }
 
-.c-hero { display: flex; justify-content: center; gap: 16px; margin-bottom: 16px; }
+.c-hero { display: flex; justify-content: center; gap: 18px; margin-bottom: 14px; }
+.hero-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
 .hero-chip { padding: 4px 12px; border-radius: 4px; font-weight: bold; font-size: 16px; }
 .hero-chip.up { color: #f5222d; background: #fff1f0; }
 .hero-chip.down { color: #52c41a; background: #f6ffed; }
+.hero-chip.flat { color: #1677ff; background: #eef6ff; }
+.hero-label {
+  color: #98a2b3;
+  font-size: 12px;
+  font-weight: 700;
+}
+.hero-sub {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
 
 .c-holdings-area { background: #f8f9fc; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
 .c-h-head { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 13px; font-weight: bold; align-items: center;}
@@ -1385,22 +1616,23 @@ export default {
 .c-h-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid-box { display: flex; justify-content: space-between; font-size: 12px; }
 .g-label { color: #888; } .g-val { font-weight: bold; }
-.g-val.up { color: #f5222d; } .g-val.down { color: #52c41a; }
+.g-val.up { color: #f5222d; } .g-val.down { color: #52c41a; } .g-val.flat { color: #1677ff; }
 
 .c-bottom-nav { display: flex; justify-content: space-around; margin-bottom: 8px; }
 .bn-col { text-align: center; font-size: 13px;}
 .bn-label { color: #888; margin-bottom: 4px;}
 .bn-val { font-weight: bold; }
-.bn-val.up { color: #f5222d; } .bn-val.down { color: #52c41a; }
+.bn-val.up { color: #f5222d; } .bn-val.down { color: #52c41a; } .bn-val.flat { color: #1677ff; }
 
 .c-chart {
-  height: 86px;
-  margin-top: 4px;
-  margin-bottom: 6px;
-  border: 1px solid #f2dede;
-  border-radius: 6px;
-  background: #fff6f6;
+  height: 132px;
+  margin-top: 10px;
+  margin-bottom: 8px;
+  border: 1px solid #f3d7d7;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fffafa 0%, #fff4f4 100%);
   overflow: hidden;
+  padding: 4px 6px;
 }
 .c-svg { width: 100%; height: 100%; }
 .c-axis { stroke: #cfd7e5; stroke-width: 0.7; }
@@ -1417,8 +1649,122 @@ export default {
 
 .c-time { text-align: center; color: #ccc; font-size: 11px; }
 
-.modal-overlay { position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;}
-.modal-box { background: #fff; padding: 20px; border-radius: 10px; width: 420px; }
+.modal-overlay { position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(17,24,39,0.55); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px;}
+.modal-box { background: #fff; padding: 20px; border-radius: 10px; width: 420px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22); }
+.holding-modal {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  padding: 24px;
+  border-radius: 14px;
+}
+.add-fund-modal {
+  width: 520px;
+  max-width: calc(100vw - 32px);
+}
+.modal-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.modal-title-row h3 {
+  margin: 0;
+  font-size: 18px;
+}
+.holding-title-row {
+  margin-bottom: 16px;
+}
+.modal-kicker {
+  margin-bottom: 4px;
+  color: #1677ff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+.modal-close {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: #f2f4f7;
+  color: #667085;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+.modal-close:hover {
+  background: #e8edf5;
+  color: #344054;
+}
+.add-search-box {
+  margin-bottom: 12px;
+}
+.add-search-input {
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  outline: none;
+}
+.add-search-input:focus {
+  border-color: #6075ff;
+  box-shadow: 0 0 0 3px rgba(96, 117, 255, 0.12);
+}
+.add-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.add-result-item {
+  display: grid;
+  grid-template-columns: 86px 1fr;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px 12px;
+  cursor: pointer;
+  text-align: left;
+  color: #344054;
+}
+.add-result-item:hover {
+  border-color: #6075ff;
+  background: #f7f9ff;
+}
+.add-result-item.selected {
+  border-color: #6075ff;
+  background: #eef2ff;
+}
+.add-result-item .fund-code {
+  font-weight: 700;
+  color: #1677ff;
+}
+.add-result-item .fund-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.add-empty,
+.add-loading {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #98a2b3;
+  background: #f9fafb;
+  border: 1px dashed #d0d5dd;
+  border-radius: 8px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
 .modal-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1446,6 +1792,11 @@ export default {
   border-radius: 8px;
   padding: 4px;
 }
+.holding-tabs {
+  margin-bottom: 18px;
+  background: #f3f6fc;
+  border: 1px solid #e8eef8;
+}
 .elegant-tabs .modal-tab {
   background: transparent;
   color: #666;
@@ -1460,6 +1811,63 @@ export default {
   box-shadow: 0 2px 6px rgba(22, 119, 255, 0.18);
   border-radius: 6px;
   font-weight: 700;
+}
+.holding-summary-card {
+  padding: 16px;
+  margin-bottom: 18px;
+  border: 1px solid #e6edf7;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+.fund-summary-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.holding-summary-card .fund-name {
+  color: #111827;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+.holding-summary-card .fund-code {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eaf2ff;
+  color: #1677ff;
+  font-size: 12px;
+  font-weight: 800;
+}
+.fund-nav-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #edf2f7;
+}
+.nav-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+.nav-value {
+  color: #101828;
+  font-size: 20px;
+  font-weight: 800;
+}
+.nav-date {
+  color: #98a2b3;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.set-holding-form {
+  padding-top: 2px;
 }
 .elegant-trade-box {
   padding-top: 16px;
@@ -1495,16 +1903,16 @@ export default {
   box-shadow: 0 2px 6px rgba(245, 124, 0, 0.2);
 }
 .elegant-input-group label {
-  font-size: 13px; color: #555; margin-bottom: 8px; font-weight: 600; display: block;
+  font-size: 13px; color: #344054; margin-bottom: 8px; font-weight: 700; display: block;
 }
 .elegant-input-group .input-wrapper {
-  display: flex; align-items: center; background: #fff; border: 1px solid #d9d9d9; border-radius: 8px; padding: 0 16px; transition: all 0.3s;
+  display: flex; align-items: center; background: #fff; border: 1px solid #d0d5dd; border-radius: 10px; padding: 0 14px; transition: all 0.25s; min-height: 48px;
 }
 .elegant-input-group .input-wrapper:focus-within {
-  border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1); background: #fafafa;
+  border-color: #1677ff; box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12); background: #fff;
 }
 .elegant-input-group .prefix {
-  color: #888; font-size: 16px; margin-right: 8px; font-weight: bold;
+  color: #98a2b3; font-size: 16px; margin-right: 8px; font-weight: 800;
 }
 .elegant-input-group .modal-input.no-border {
   border: none; outline: none; box-shadow: none; font-size: 15px; padding: 12px 0; flex: 1; background: transparent; width: 100%; box-sizing: border-box;
@@ -1512,20 +1920,28 @@ export default {
 .elegant-input-group .modal-input.highlight {
   font-weight: bold; color: #222; font-size: 16px;
 }
+.date-wrapper {
+  padding-right: 10px;
+}
 .elegant-actions {
   margin-top: 24px; display: flex; gap: 12px; justify-content: flex-end; padding-top: 16px; border-top: 1px solid #f0f0f0;
 }
 .elegant-btn-cancel {
-  background: #f0f2f5; color: #666; font-weight: bold; padding: 10px 24px; border-radius: 6px; border: none; cursor: pointer; transition: background 0.2s;
+  background: #f2f4f7; color: #475467; font-weight: bold; padding: 10px 24px; border-radius: 8px; border: none; cursor: pointer; transition: background 0.2s;
 }
 .elegant-btn-cancel:hover { background: #e5e8ea; }
 .elegant-btn-confirm {
-  font-weight: bold; color: #fff; border: none; padding: 10px 32px; border-radius: 6px; cursor: pointer; transition: opacity 0.2s;
+  font-weight: bold; color: #fff; border: none; padding: 10px 32px; border-radius: 8px; cursor: pointer; transition: opacity 0.2s, transform 0.2s;
 }
 .elegant-btn-confirm.buy { background: #1677ff; }
-.elegant-btn-confirm.buy:hover { opacity: 0.85; }
+.elegant-btn-confirm.buy:hover { opacity: 0.9; transform: translateY(-1px); }
 .elegant-btn-confirm.sell { background: #f5222d; }
-.elegant-btn-confirm.sell:hover { opacity: 0.85; }
+.elegant-btn-confirm.sell:hover { opacity: 0.9; transform: translateY(-1px); }
+.elegant-btn-confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
+}
 
 .trade-inline-hint {
   margin-top: 8px;

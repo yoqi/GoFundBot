@@ -197,6 +197,24 @@ const historyMap = ref({})
 const lastRefreshTime = ref('')
 let refreshTimer = null
 
+const normalizeFundCode = code => {
+  const text = String(code ?? '').trim()
+  return /^\d{1,6}$/.test(text) ? text.padStart(6, '0') : text
+}
+
+const fundSearchList = response => {
+  const data = response?.data?.data
+  return Array.isArray(data) ? data : (data?.funds || [])
+}
+
+const trendNav = item => {
+  if (!item) return null
+  const raw = item.net_worth ?? item.value ?? item.y
+  if (raw === null || raw === undefined || raw === '') return null
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : null
+}
+
 const pnlBarChartEl = ref(null)
 const returnTrendChartEl = ref(null)
 let pnlBarChart = null
@@ -223,8 +241,8 @@ const operationText = ref('')
 const operationLoading = ref(false)
 
 
-const currentNav = item => quoteMap.value[item.code]?.nav ?? item.cost
-const quoteTime = item => quoteMap.value[item.code]?.time || '--'
+const currentNav = item => quoteMap.value[normalizeFundCode(item.code)]?.nav ?? item.cost
+const quoteTime = item => quoteMap.value[normalizeFundCode(item.code)]?.time || '--'
 
 const costAmount = item => Number(item.shares || 0) * Number(item.cost || 0)
 const marketAmount = item => Number(item.shares || 0) * Number(currentNav(item) || 0)
@@ -248,13 +266,14 @@ const findClosestNetWorth = (trend, targetDate) => {
 
   for (const item of trend) {
     const dateStr = normalizeDate(item.date)
-    if (!dateStr || item.value === null || item.value === undefined) continue
+    const nav = trendNav(item)
+    if (!dateStr || nav === null) continue
 
     const ts = new Date(dateStr).setHours(0, 0, 0, 0)
     if (Number.isNaN(ts) || ts > target) continue
 
     if (!best || ts > best.ts) {
-      best = { ts, date: dateStr, value: Number(item.value) }
+      best = { ts, date: dateStr, value: nav }
     }
   }
 
@@ -268,16 +287,17 @@ const findNavAtOrBeforeDate = (trend, dateStr) => {
 
 
 const getFundNavByRule = async (code, date, time = '15:00') => {
+  const fundCode = normalizeFundCode(code)
   const isToday = date === today
   const isBeforeCutoff = time < '15:00'
 
   try {
     if (isToday && isBeforeCutoff) {
-      const quote = await fetchRealtimeQuote(code)
+      const quote = await fetchRealtimeQuote(fundCode)
       if (quote?.nav) return quote.nav
     }
 
-    const trend = await loadTrendByCode(code)
+    const trend = await loadTrendByCode(fundCode)
     const match = findClosestNetWorth(trend, date)
     if (match) return Number(match.value)
   } catch (error) {
@@ -285,10 +305,10 @@ const getFundNavByRule = async (code, date, time = '15:00') => {
   }
 
   // 兜底：优先使用当前已缓存估值，其次使用持仓成本净值
-  const cachedQuote = quoteMap.value[code]?.nav
+  const cachedQuote = quoteMap.value[fundCode]?.nav
   if (cachedQuote) return Number(cachedQuote)
 
-  const existing = positions.value.find(item => item.code === code)
+  const existing = positions.value.find(item => normalizeFundCode(item.code) === fundCode)
   if (existing?.cost) return Number(existing.cost)
 
   return null
@@ -305,11 +325,12 @@ const handleOperationTypeChange = () => {
 }
 
 const loadTargetFundName = async () => {
-  const code = String(operationForm.targetCode || '').trim()
+  const code = normalizeFundCode(operationForm.targetCode)
   if (!/^\d{6}$/.test(code)) return
+  operationForm.targetCode = code
   try {
     const response = await fundAPI.searchFunds(code)
-    const list = response?.data?.data?.funds || []
+    const list = fundSearchList(response)
     const exact = list.find(item => item.CODE === code) || list[0]
     if (exact) operationForm.targetName = exact.NAME || operationForm.targetName
   } catch (error) {
@@ -361,7 +382,8 @@ const applyOperation = async () => {
     }
 
     if (operationForm.type === 'convert') {
-      const targetCode = String(operationForm.targetCode || '').trim()
+      const targetCode = normalizeFundCode(operationForm.targetCode)
+      operationForm.targetCode = targetCode
       if (!/^\d{6}$/.test(targetCode) || !operationForm.targetName) {
         operationText.value = '请填写有效的目标基金代码与名称。'
         return
@@ -385,7 +407,7 @@ const applyOperation = async () => {
       }
 
       const addShares = amount / targetNav
-      const existingTarget = positions.value.find(item => item.code === targetCode)
+      const existingTarget = positions.value.find(item => normalizeFundCode(item.code) === targetCode)
       if (existingTarget) {
         const oldCost = existingTarget.cost * existingTarget.shares
         const newShares = existingTarget.shares + addShares
@@ -422,7 +444,7 @@ const applyOperation = async () => {
 }
 
 const loadFundNameByCode = async code => {
-  const normalizedCode = String(code || '').trim()
+  const normalizedCode = normalizeFundCode(code)
   if (!/^\d{6}$/.test(normalizedCode)) {
     helperText.value = '请输入 6 位基金代码。'
     return
@@ -431,7 +453,7 @@ const loadFundNameByCode = async code => {
   try {
     isAutoFilling.value = true
     const response = await fundAPI.searchFunds(normalizedCode)
-    const list = response?.data?.data?.funds || []
+    const list = fundSearchList(response)
     const exact = list.find(item => item.CODE === normalizedCode) || list[0]
 
     if (exact) {
@@ -449,27 +471,37 @@ const loadFundNameByCode = async code => {
 }
 
 const loadTrendByCode = async code => {
-  if (trendCache.has(code)) return trendCache.get(code)
-  const response = await fundAPI.getFundTrend(code)
+  const fundCode = normalizeFundCode(code)
+  if (trendCache.has(fundCode)) return trendCache.get(fundCode)
+  const response = await fundAPI.getFundTrend(fundCode)
   const trend = response?.data?.net_worth_trend || []
-  trendCache.set(code, trend)
+  trendCache.set(fundCode, trend)
   return trend
 }
 
 const fetchRealtimeQuote = async code => {
-  const response = await fundAPI.getFundDetail(code)
+  const fundCode = normalizeFundCode(code)
+  const response = await fundAPI.getFundDetail(fundCode)
   const realtime = response?.data?.realtime_estimate || {}
-  const estimate = Number(realtime.estimate_value || realtime.net_worth)
-  if (Number.isNaN(estimate)) return null
+  const estimate = Number(realtime.estimate_value)
+  const official = Number(realtime.net_worth)
+  const estimateDate = normalizeDate(realtime.estimate_time)
+  const officialDate = normalizeDate(realtime.net_worth_date)
+  const useOfficial = Number.isFinite(official) && officialDate && (!estimateDate || officialDate >= estimateDate)
+  const nav = useOfficial ? official : estimate
+  if (!Number.isFinite(nav)) return null
   return {
-    nav: estimate,
-    time: realtime.estimate_time || realtime.net_worth_date || '--'
+    nav,
+    date: useOfficial ? officialDate : estimateDate,
+    source: useOfficial ? 'official' : 'estimate',
+    time: useOfficial ? (realtime.net_worth_date || '--') : (realtime.estimate_time || '--')
   }
 }
 
 const fillCostByDateRule = async () => {
-  const code = String(form.code || '').trim()
+  const code = normalizeFundCode(form.code)
   if (!/^\d{6}$/.test(code) || !form.purchaseDate || !form.purchaseTime) return
+  form.code = code
 
   const isToday = form.purchaseDate === today
   const isBeforeCutoff = form.purchaseTime < '15:00'
@@ -511,7 +543,7 @@ const fillCostByDateRule = async () => {
 
 const refreshRealtimeQuotes = async () => {
   if (positions.value.length === 0) return
-  const codes = [...new Set(positions.value.map(item => item.code).filter(Boolean))]
+  const codes = [...new Set(positions.value.map(item => normalizeFundCode(item.code)).filter(Boolean))]
 
   try {
     const results = await Promise.allSettled(codes.map(code => fetchRealtimeQuote(code)))
@@ -537,7 +569,7 @@ const loadHistoryForPositions = async () => {
     return
   }
 
-  const codes = [...new Set(positions.value.map(item => item.code).filter(Boolean))]
+  const codes = [...new Set(positions.value.map(item => normalizeFundCode(item.code)).filter(Boolean))]
   const results = await Promise.allSettled(codes.map(code => loadTrendByCode(code)))
   const next = {}
   results.forEach((result, index) => {
@@ -574,7 +606,7 @@ const buildPortfolioReturnSeries = () => {
 
     for (const item of positions.value) {
       if (!item.purchaseDate || new Date(date) < new Date(item.purchaseDate)) continue
-      const trend = historyMap.value[item.code] || []
+      const trend = historyMap.value[normalizeFundCode(item.code)] || []
       const nav = findNavAtOrBeforeDate(trend, date)
       if (nav !== null) {
         market += Number(item.shares || 0) * nav
@@ -590,19 +622,25 @@ const buildPortfolioReturnSeries = () => {
   return rows
 }
 
-const getPortfolioProfitAtDate = dateStr => {
-  let market = 0
-  let cost = 0
-  positions.value.forEach(item => {
-    if (!item.purchaseDate || new Date(dateStr) < new Date(item.purchaseDate)) return
-    const trend = historyMap.value[item.code] || []
-    const nav = findNavAtOrBeforeDate(trend, dateStr)
-    if (nav !== null) {
-      market += Number(item.shares || 0) * nav
-      cost += costAmount(item)
+const periodProfitSince = dateStr => {
+  if (!dateStr) return totalProfit.value
+
+  return positions.value.reduce((sum, item) => {
+    const shares = Number(item.shares || 0)
+    const current = Number(currentNav(item) || 0)
+    if (shares <= 0 || current <= 0) return sum
+
+    const purchasedAfterBase = item.purchaseDate && new Date(item.purchaseDate) > new Date(dateStr)
+    if (purchasedAfterBase) {
+      return sum + shares * (current - Number(item.cost || 0))
     }
-  })
-  return market - cost
+
+    const trend = historyMap.value[normalizeFundCode(item.code)] || []
+    const baseNav = findNavAtOrBeforeDate(trend, dateStr)
+    if (baseNav === null) return sum
+
+    return sum + shares * (current - baseNav)
+  }, 0)
 }
 
 const getLastTradingDateBefore = dateStr => {
@@ -613,7 +651,6 @@ const getLastTradingDateBefore = dateStr => {
 const calendarPnl = computed(() => {
   if (positions.value.length === 0) return { day: 0, month: 0, year: 0 }
 
-  const currentProfit = totalProfit.value
   const now = new Date()
   const todayStr = now.toISOString().split('T')[0]
   const monthStart = `${todayStr.slice(0, 8)}01`
@@ -623,14 +660,10 @@ const calendarPnl = computed(() => {
   const prevMonth = getLastTradingDateBefore(monthStart)
   const prevYear = getLastTradingDateBefore(yearStart)
 
-  const dayBase = prevDay ? getPortfolioProfitAtDate(prevDay) : 0
-  const monthBase = prevMonth ? getPortfolioProfitAtDate(prevMonth) : 0
-  const yearBase = prevYear ? getPortfolioProfitAtDate(prevYear) : 0
-
   return {
-    day: currentProfit - dayBase,
-    month: currentProfit - monthBase,
-    year: currentProfit - yearBase
+    day: prevDay ? periodProfitSince(prevDay) : totalProfit.value,
+    month: prevMonth ? periodProfitSince(prevMonth) : totalProfit.value,
+    year: prevYear ? periodProfitSince(prevYear) : totalProfit.value
   }
 })
 
@@ -721,7 +754,12 @@ const save = () => {
 const load = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) positions.value = JSON.parse(raw)
+    if (raw) {
+      positions.value = JSON.parse(raw).map(item => ({
+        ...item,
+        code: normalizeFundCode(item.code)
+      }))
+    }
   } catch (error) {
     console.error('读取持仓失败:', error)
   }
@@ -738,9 +776,10 @@ const resetForm = () => {
 }
 
 const addPosition = async () => {
+  const code = normalizeFundCode(form.code)
   positions.value.unshift({
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    code: form.code,
+    code,
     name: form.name,
     purchaseDate: form.purchaseDate,
     purchaseTime: form.purchaseTime,
