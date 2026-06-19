@@ -34,7 +34,7 @@
       
       <!-- 板块排行 Tab -->
       <div v-show="activeTab === 'sectors'" class="tab-content">
-        <SectorRank :limit="50" :initialDisplay="30" />
+        <SectorRank :limit="500" />
       </div>
       
       <!-- 快讯 Tab -->

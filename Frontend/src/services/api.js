@@ -212,7 +212,7 @@ export const marketAPI = {
   },
   
   // 获取行业板块排行
-  getSectorRank(limit = 50) {
+  getSectorRank(limit = 500) {
     return api.get(`/market/sectors?limit=${limit}`)
   },
   

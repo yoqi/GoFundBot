@@ -3,14 +3,38 @@
   <div class="sector-rank-container">
     <div class="section-header">
       <h3>🏭 行业板块排行</h3>
-      <div class="header-actions">
+      <input
+        v-model.trim="keyword"
+        class="search-input header-search"
+        placeholder="搜索板块名称..."
+      />
+      <button class="refresh-btn" @click="fetchSectors" :disabled="loading" title="刷新">
+        <span :class="{ 'spinning': loading }">🔄</span>
+      </button>
+    </div>
+    <div class="filter-panel">
+      <div class="filter-row">
         <select v-model="sortBy" class="sort-select" @change="sortData">
           <option value="change">按涨跌幅</option>
           <option value="inflow">按主力流入</option>
         </select>
-        <button class="refresh-btn" @click="fetchSectors" :disabled="loading">
-          <span :class="{ 'spinning': loading }">🔄</span>
-        </button>
+        <select v-model="changeFilter" class="sort-select">
+          <option value="all">全部涨跌</option>
+          <option value="up">上涨</option>
+          <option value="down">下跌</option>
+          <option value="flat">平盘</option>
+        </select>
+        <select v-model="flowFilter" class="sort-select">
+          <option value="all">全部资金</option>
+          <option value="inflow">主力流入</option>
+          <option value="outflow">主力流出</option>
+        </select>
+      </div>
+      <div class="market-stats" v-if="sectors.length">
+        <span class="stat-chip total">{{ isPartial ? '缓存' : '全市场' }} {{ sectors.length }}</span>
+        <span class="stat-chip up">上涨 {{ upCount }}</span>
+        <span class="stat-chip flat">平盘 {{ flatCount }}</span>
+        <span class="stat-chip down">下跌 {{ downCount }}</span>
       </div>
     </div>
     
@@ -28,13 +52,13 @@
       <!-- 涨跌分布概览 -->
       <div class="overview-bar" v-if="sectors.length">
         <div class="bar-section up" :style="{ width: upPercent + '%' }">
-          <span v-if="upPercent > 15">{{ upCount }}</span>
+          <span v-if="upCount">{{ upCount }}</span>
         </div>
         <div class="bar-section flat" :style="{ width: flatPercent + '%' }">
-          <span v-if="flatPercent > 10">{{ flatCount }}</span>
+          <span v-if="flatCount">{{ flatCount }}</span>
         </div>
         <div class="bar-section down" :style="{ width: downPercent + '%' }">
-          <span v-if="downPercent > 15">{{ downCount }}</span>
+          <span v-if="downCount">{{ downCount }}</span>
         </div>
       </div>
       
@@ -49,7 +73,7 @@
             'down': sector.raw_change < 0
           }"
         >
-          <div class="sector-rank">{{ index + 1 }}</div>
+          <div class="sector-rank">{{ pageStart + index + 1 }}</div>
           <div class="sector-info">
             <div class="sector-name">{{ sector.name }}</div>
             <div class="sector-flow">
@@ -64,23 +88,28 @@
         </div>
       </div>
       
-      <!-- 展开/收起按钮 -->
-      <div class="expand-toggle" v-if="sectors.length > initialDisplay">
-        <button @click="expanded = !expanded">
-          {{ expanded ? '收起' : `展开全部 (${sectors.length})` }}
-          <span class="arrow" :class="{ 'expanded': expanded }">▼</span>
-        </button>
+      <div v-if="!displayedSectors.length" class="empty-filter">没有匹配的板块</div>
+
+      <div v-if="filteredSectors.length > pageSize" class="pagination">
+        <button class="page-btn" @click="currentPage = 1" :disabled="currentPage === 1">首页</button>
+        <button class="page-btn" @click="currentPage -= 1" :disabled="currentPage === 1">上一页</button>
+        <span class="page-info">第 {{ currentPage }} / {{ totalPages }} 页</span>
+        <button class="page-btn" @click="currentPage += 1" :disabled="currentPage === totalPages">下一页</button>
+        <button class="page-btn" @click="currentPage = totalPages" :disabled="currentPage === totalPages">末页</button>
       </div>
     </div>
     
     <div v-if="updateTime" class="update-time">
-      更新于{{ updateTime }}
+      <span v-if="dataDate" class="data-date">
+        {{ isStale ? '上个交易日数据' : '数据日期' }} {{ dataDate }}
+      </span>
+      <span>更新于{{ updateTime }}</span>
     </div>
   </div>
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { marketAPI } from '../services/api'
 
 export default {
@@ -88,11 +117,7 @@ export default {
   props: {
     limit: {
       type: Number,
-      default: 50
-    },
-    initialDisplay: {
-      type: Number,
-      default: 15
+      default: 500
     },
     autoRefresh: {
       type: Boolean,
@@ -108,31 +133,67 @@ export default {
     const loading = ref(false)
     const error = ref(null)
     const updateTime = ref('')
-    const expanded = ref(false)
+    const dataDate = ref('')
+    const isStale = ref(false)
+    const isPartial = ref(false)
     const sortBy = ref('change')
+    const keyword = ref('')
+    const changeFilter = ref('all')
+    const flowFilter = ref('all')
+    const pageSize = 20
+    const currentPage = ref(1)
     let refreshTimer = null
     
     const fetchSectors = async () => {
       loading.value = true
       error.value = null
-      
+
       try {
+        // 统一通过后端 API 获取板块数据
+        // 后端内部：East Money → akshare 同花顺 → 文件缓存（自动降级）
         const response = await marketAPI.getSectorRank(props.limit)
-        if (response.data.success) {
-          sectors.value = response.data.data
-          updateTime.value = response.data.update_time
-          sortData()
-        } else {
-          error.value = response.data.error || '获取板块数据失败'
+        if (response.data.success && response.data.data?.length) {
+          applySectorData(response.data.data, {
+            update_time: response.data.update_time,
+            data_date: response.data.data_date || '',
+            is_stale: !!response.data.is_stale,
+            is_partial: !!response.data.is_partial,
+            source: response.data.source || 'backend'
+          })
+          return
         }
+
+        // 后端返回失败但可能有部分数据
+        if (response.data.data?.length) {
+          applySectorData(response.data.data, {
+            update_time: response.data.update_time || '',
+            data_date: response.data.data_date || '',
+            is_stale: !!response.data.is_stale,
+            is_partial: true,
+            source: 'backend_partial'
+          })
+          return
+        }
+
+        error.value = response.data.error || '外部行情源暂不可用，暂无可展示的板块排行'
       } catch (e) {
-        error.value = '网络错误，请稍后重试'
+        error.value = '外部行情源连接失败，请稍后重试'
         console.error('获取板块排行失败:', e)
       } finally {
         loading.value = false
       }
     }
-    
+
+    const applySectorData = (rows, meta = {}) => {
+      sectors.value = rows
+      updateTime.value = meta.update_time || ''
+      dataDate.value = meta.data_date || ''
+      isStale.value = !!meta.is_stale
+      isPartial.value = !!meta.is_partial
+      sortData()
+      currentPage.value = 1
+    }
+
     const sortData = () => {
       if (sortBy.value === 'change') {
         sectors.value.sort((a, b) => b.raw_change - a.raw_change)
@@ -141,9 +202,23 @@ export default {
       }
     }
     
+    const filteredSectors = computed(() => {
+      const q = keyword.value.trim().toLowerCase()
+      return sectors.value.filter(sector => {
+        if (q && !String(sector.name || '').toLowerCase().includes(q)) return false
+        if (changeFilter.value === 'up' && !(sector.raw_change > 0)) return false
+        if (changeFilter.value === 'down' && !(sector.raw_change < 0)) return false
+        if (changeFilter.value === 'flat' && sector.raw_change !== 0) return false
+        if (flowFilter.value === 'inflow' && !(sector.raw_main_inflow > 0)) return false
+        if (flowFilter.value === 'outflow' && !(sector.raw_main_inflow < 0)) return false
+        return true
+      })
+    })
+
+    const totalPages = computed(() => Math.max(1, Math.ceil(filteredSectors.value.length / pageSize)))
+    const pageStart = computed(() => (currentPage.value - 1) * pageSize)
     const displayedSectors = computed(() => {
-      if (expanded.value) return sectors.value
-      return sectors.value.slice(0, props.initialDisplay)
+      return filteredSectors.value.slice(pageStart.value, pageStart.value + pageSize)
     })
     
     // 涨跌分布统计
@@ -161,6 +236,14 @@ export default {
       if (flow.startsWith('-')) return 'outflow'
       return 'inflow'
     }
+
+    watch([keyword, changeFilter, flowFilter], () => {
+      currentPage.value = 1
+    })
+
+    watch(totalPages, (pages) => {
+      if (currentPage.value > pages) currentPage.value = pages
+    })
     
     onMounted(() => {
       fetchSectors()
@@ -180,8 +263,18 @@ export default {
       loading,
       error,
       updateTime,
-      expanded,
+      dataDate,
+      isStale,
+      isPartial,
       sortBy,
+      keyword,
+      changeFilter,
+      flowFilter,
+      pageSize,
+      currentPage,
+      totalPages,
+      pageStart,
+      filteredSectors,
       displayedSectors,
       upCount,
       downCount,
@@ -209,32 +302,111 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border-color, #eee);
 }
 
 .section-header h3 {
+  flex-shrink: 0;
   margin: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary, #333);
 }
 
-.header-actions {
+.filter-panel {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.filter-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   align-items: center;
 }
 
 .sort-select {
-  padding: 4px 8px;
+  height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--border-color, #ddd);
-  border-radius: 4px;
+  border-radius: 8px;
   font-size: 12px;
   background: var(--card-bg, #fff);
   color: var(--text-secondary, #666);
   cursor: pointer;
+}
+
+.market-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.stat-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.stat-chip.total {
+  color: var(--primary-color, #1677ff);
+  background: #eef4ff;
+}
+
+.stat-chip.up {
+  color: #e74c3c;
+  background: #fff1f0;
+}
+
+.stat-chip.flat {
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.stat-chip.down {
+  color: #27ae60;
+  background: #f0fdf4;
+}
+
+.stat-chip.page {
+  color: #7c3aed;
+  background: #f3efff;
+}
+
+.search-input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--text-primary, #333);
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.search-input:focus {
+  border-color: var(--primary-color, #1677ff);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+}
+
+.header-search {
+  flex: 1;
+  max-width: 260px;
 }
 
 .refresh-btn {
@@ -264,10 +436,11 @@ export default {
 /* 涨跌分布�?*/
 .overview-bar {
   display: flex;
-  height: 24px;
-  border-radius: 4px;
+  height: 28px;
+  border-radius: 8px;
   overflow: hidden;
   margin-bottom: 16px;
+  background: #f1f5f9;
 }
 
 .bar-section {
@@ -281,15 +454,15 @@ export default {
 }
 
 .bar-section.up {
-  background: linear-gradient(90deg, #e74c3c, #c0392b);
+  background: #e74c3c;
 }
 
 .bar-section.flat {
-  background: #95a5a6;
+  background: #94a3b8;
 }
 
 .bar-section.down {
-  background: linear-gradient(90deg, #27ae60, #1e8449);
+  background: #27ae60;
 }
 
 /* 板块列表 */
@@ -297,8 +470,9 @@ export default {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 500px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
+  padding-right: 4px;
 }
 
 .sector-item {
@@ -317,10 +491,12 @@ export default {
 
 .sector-item.up {
   border-left-color: #e74c3c;
+  background: #fff8f7;
 }
 
 .sector-item.down {
   border-left-color: #27ae60;
+  background: #f7fff9;
 }
 
 .sector-rank {
@@ -400,37 +576,59 @@ export default {
   color: #27ae60;
 }
 
-/* 展开按钮 */
-.expand-toggle {
+.empty-filter {
   margin-top: 12px;
+  padding: 28px 12px;
+  border: 1px dashed var(--border-color, #ddd);
+  border-radius: 10px;
   text-align: center;
+  color: var(--text-secondary, #999);
+  font-size: 13px;
+  background: #fafafa;
 }
 
-.expand-toggle button {
-  background: transparent;
-  border: 1px solid var(--border-color, #ddd);
-  padding: 8px 20px;
-  border-radius: 20px;
-  font-size: 13px;
-  color: var(--text-secondary, #666);
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color, #eee);
+}
+
+.page-btn {
+  min-width: 64px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text-primary, #333);
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
 }
 
-.expand-toggle button:hover {
-  background: var(--hover-bg, #f5f5f5);
-  border-color: var(--primary-color, #81D8CF);
-  color: var(--primary-color, #81D8CF);
+.page-btn:hover:not(:disabled) {
+  border-color: var(--primary-color, #1677ff);
+  color: var(--primary-color, #1677ff);
+  background: #eef4ff;
 }
 
-.arrow {
-  display: inline-block;
-  margin-left: 4px;
-  transition: transform 0.2s;
+.page-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
-.arrow.expanded {
-  transform: rotate(180deg);
+.page-info {
+  min-width: 92px;
+  text-align: center;
+  color: var(--text-secondary, #666);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* 状�?*/
@@ -466,8 +664,42 @@ export default {
 
 .update-time {
   margin-top: 12px;
-  text-align: right;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
   font-size: 11px;
   color: var(--text-tertiary, #bbb);
+}
+
+.data-date {
+  color: #8b5cf6;
+  background: #f3efff;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+@media (max-width: 1280px) {
+  .section-header {
+    gap: 8px;
+  }
+
+  .filter-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .section-header {
+    align-items: center;
+  }
+
+  .header-search {
+    max-width: none;
+  }
+
+  .filter-row {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

@@ -109,6 +109,88 @@ def _build_cached_response(db: Session, fund_code: str):
 
     return data
 
+@app.route('/api/eastmoney/<path:subpath>', methods=['GET'])
+def proxy_eastmoney(subpath):
+    """
+    代理东方财富行情 API 请求
+
+    用于生产环境：前端通过本后端转发请求到东方财富，
+    避免跨域和 JSONP 依赖问题。
+    开发环境中由 Vite 代理处理，此端点作为兜底。
+    """
+    import requests as req
+    import urllib3
+    urllib3.disable_warnings()
+
+    target_url = f"https://push2.eastmoney.com/{subpath}"
+    query_string = request.query_string.decode('utf-8')
+    if query_string:
+        target_url = f"{target_url}?{query_string}"
+
+    base_headers = {
+        "Referer": "https://quote.eastmoney.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+    errors = []
+
+    # 方案1：使用系统代理（与浏览器行为一致）
+    try:
+        s1 = req.Session()
+        s1.trust_env = True
+        resp = s1.get(target_url, headers=base_headers, timeout=10, verify=False)
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+    except Exception as exc:
+        errors.append(f"env-proxy: {str(exc)[:80]}")
+
+    # 方案2：不使用系统代理（直连）
+    try:
+        s2 = req.Session()
+        s2.trust_env = False
+        resp = s2.get(target_url, headers=base_headers, timeout=10, verify=False)
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+    except Exception as exc:
+        errors.append(f"direct: {str(exc)[:80]}")
+
+    # 方案3：curl_cffi 模拟 Chrome（绕过 TLS 指纹检测）
+    try:
+        from curl_cffi import requests as curl_requests
+        last_imp_error = None
+        for impersonate_target in ("chrome124", "chrome120", "chrome110", "chrome101", "edge101"):
+            try:
+                resp = curl_requests.get(
+                    target_url,
+                    headers=base_headers,
+                    timeout=10,
+                    verify=False,
+                    impersonate=impersonate_target
+                )
+                if resp.status_code == 200:
+                    return jsonify(resp.json())
+            except Exception as imp_exc:
+                last_imp_error = str(imp_exc)[:60]
+                continue
+        errors.append(f"curl_cffi(all): {last_imp_error or 'unknown'}")
+    except Exception as exc:
+        errors.append(f"curl_cffi: {str(exc)[:80]}")
+
+    # 方案4：普通 requests（默认配置，verify=True）
+    try:
+        resp = req.get(target_url, headers=base_headers, timeout=10)
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+    except Exception as exc:
+        errors.append(f"default: {str(exc)[:80]}")
+
+    import logging
+    logging.getLogger(__name__).warning(f"东方财富代理全部失败: {'; '.join(errors)}")
+    return jsonify({"error": "东方财富代理请求失败", "details": errors}), 502
+
+
 @app.route('/')
 def hello():
     """测试接口是否可用"""
@@ -338,13 +420,16 @@ def get_daily_market():
         if not ai_service.is_available():
             return jsonify({"error": "AI service not configured. Please set LLM_API_KEY in .env"}), 503
         
-        # 从 fund_master_routes 获取市场数据
+        # 从 fund_master_service 获取市场数据
         from fund_master_service import FundMasterService
+        from services.market_data import get_market_data_service as get_mds
+
         service = FundMasterService()
-        
+        mds = get_mds()
+
         market_data = {
             'indices': service.get_market_overview(),
-            'sectors': service.get_sector_rank(),
+            'sectors': mds.get_industry_boards(page_size=500),
             'news': service.get_flash_news()[:10]
         }
         

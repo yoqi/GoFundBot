@@ -8,11 +8,13 @@ Fund-Master 核心功能服务模块
 import datetime
 import html
 import json
+import os
 import re
 import time
 import threading
 import requests
 import urllib3
+from urllib.parse import urlencode
 
 try:
     from curl_cffi import requests as curl_requests
@@ -57,15 +59,49 @@ class FundMasterService:
             return default
 
     def _get_json(self, url, params=None, headers=None, timeout=10):
-        response = self.session.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=timeout,
-            verify=False,
-        )
-        response.raise_for_status()
-        return response.json()
+        """获取 JSON 数据，依次尝试多种网络会话以适配不同网络环境"""
+        errors = []
+
+        # 构建多个会话按优先级尝试（env 代理优先，匹配浏览器行为）
+        candidates = []
+        # 会话1: 使用系统代理（与浏览器行为一致，适合需要代理/VPN 的环境）
+        env_session = requests.Session()
+        env_session.trust_env = True
+        candidates.append(env_session)
+        # 会话2: 不使用系统代理（适合直连环境）
+        candidates.append(self.session)
+
+        for session in candidates:
+            try:
+                response = session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                    verify=False,
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as exc:
+                errors.append(exc)
+
+        # 会话3: curl_cffi 模拟 Chrome 浏览器指纹（绕过反爬检测）
+        if CURL_CFFI_AVAILABLE:
+            try:
+                response = curl_requests.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                    verify=False,
+                    impersonate="chrome"
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as exc:
+                errors.append(exc)
+
+        raise errors[-1]
 
     def _short_error(self, error):
         message = str(error)
@@ -128,6 +164,128 @@ class FundMasterService:
         with self._cache_lock:
             ttl = self.CACHE_TTL.get(ttl_key, 60)
             self._cache[key] = (data, time.time() + ttl)
+
+    def _last_a_share_trading_date(self):
+        now = datetime.datetime.now()
+        day = now.date()
+        minutes = now.hour * 60 + now.minute
+        if day.weekday() >= 5 or minutes < 9 * 60 + 30:
+            day -= datetime.timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= datetime.timedelta(days=1)
+        return day.strftime("%Y-%m-%d")
+
+    def _is_a_share_trading_time(self):
+        now = datetime.datetime.now()
+        if now.weekday() >= 5:
+            return False
+        minutes = now.hour * 60 + now.minute
+        return (9 * 60 + 30 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60)
+
+    def _sector_rank_cache_file(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(root, "Data", "sector_rank_cache.json")
+
+    def _save_sector_rank_file_cache(self, data):
+        try:
+            path = self._sector_rank_cache_file()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _load_sector_rank_file_cache(self, limit, data_date, require_full=True):
+        try:
+            path = self._sector_rank_cache_file()
+            if not os.path.exists(path):
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            rows = cached.get("data") or []
+            if not rows:
+                return None
+            if any("?" in str(row.get("name") or "") for row in rows):
+                return None
+            min_expected = min(max(limit, 1), 100)
+            if require_full and len(rows) < min_expected:
+                return None
+            is_full = len(rows) >= min_expected
+            return {
+                **cached,
+                "success": True,
+                "data": rows[:limit],
+                "source": "file_cache" if is_full else "partial_file_cache",
+                "is_stale": True,
+                "is_partial": not is_full,
+                "data_date": cached.get("data_date") or data_date,
+            }
+        except Exception:
+            return None
+
+    def _is_valid_sector_rank(self, rows):
+        if not rows:
+            return False
+        return any(
+            abs(self._safe_float(row.get("raw_change"), 0.0)) > 0.0001 or
+            abs(self._safe_float(row.get("raw_main_inflow"), 0.0)) > 0.0001
+            for row in rows
+        )
+
+    def _format_amount_yi(self, value):
+        amount = self._safe_float(value, 0.0)
+        if not amount:
+            return "0亿"
+        return f"{round(amount / 100000000, 2)}亿"
+
+    def _format_pct(self, value):
+        return f"{round(self._safe_float(value, 0.0), 2)}%"
+
+    def _get_sector_rank_akshare(self, limit):
+        try:
+            import akshare as ak
+            import pandas as pd
+        except Exception:
+            return []
+
+        candidates = []
+        for fn_name in ("stock_board_industry_name_em", "stock_board_industry_summary_ths"):
+            try:
+                fn = getattr(ak, fn_name, None)
+                if not fn:
+                    continue
+                df = fn()
+                if df is None or df.empty:
+                    continue
+                candidates.append(df)
+            except Exception:
+                continue
+
+        for df in candidates:
+            rows = []
+            for _, row in df.head(max(limit, 80)).iterrows():
+                name = row.get("板块名称") or row.get("板块") or row.get("名称")
+                if not name:
+                    continue
+                change = row.get("涨跌幅")
+                if change is None:
+                    change = row.get("涨幅") or row.get("涨跌幅/%")
+                inflow = row.get("主力净流入") or row.get("净额") or row.get("资金净流入") or 0
+                inflow_pct = row.get("主力净流入占比") or row.get("净占比") or 0
+                rows.append({
+                    "name": str(name),
+                    "change_pct": self._format_pct(change),
+                    "main_inflow": self._format_amount_yi(inflow),
+                    "main_inflow_pct": self._format_pct(inflow_pct),
+                    "small_inflow": "0亿",
+                    "small_inflow_pct": "0.00%",
+                    "raw_change": self._safe_float(change, 0.0),
+                    "raw_main_inflow": self._safe_float(inflow, 0.0)
+                })
+            rows.sort(key=lambda x: x["raw_change"], reverse=True)
+            if self._is_valid_sector_rank(rows):
+                return rows[:limit]
+        return []
     
     # ==================== 7x24 快讯 ====================
     def get_flash_news(self, count: int = 20) -> dict:
@@ -365,7 +523,7 @@ class FundMasterService:
         return result
     
     # ==================== 行业板块排行 ====================
-    def get_sector_rank(self, limit: int = 50) -> dict:
+    def get_sector_rank(self, limit: int = 500) -> dict:
         """
         获取行业板块排行（按主力净流入排序）
         数据源：东方财富
@@ -380,93 +538,154 @@ class FundMasterService:
         cached = self._get_cache(cache_key)
         if cached:
             return cached
-        
+        data_date = self._last_a_share_trading_date()
+        is_stale = not self._is_a_share_trading_time()
+
+        if is_stale:
+            file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=True)
+            if file_cached:
+                self._set_cache(cache_key, file_cached, 'sector_rank')
+                return file_cached
+
         try:
             url = "https://push2.eastmoney.com/api/qt/clist/get"
-            params = {
+            page_size = min(max(limit, 20), 100)
+            base_params = {
                 "cb": "",
-                "fid": "f62",
+                "fid": "f3",
                 "po": "1",
-                "pz": str(limit),
-                "pn": "1",
                 "np": "1",
                 "fltt": "2",
                 "invt": "2",
-                "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
-                "fs": "m:90 t:2",
-                "fields": "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124,f1,f13"
+                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                "fs": "m:90+t:2",
+                "fields": "f12,f14,f2,f3,f4,f5,f6,f7,f8,f9,f23,f62,f184"
             }
             headers = {
-                "Referer": "https://fund.eastmoney.com/daogou/",
+                "Referer": "https://quote.eastmoney.com/",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
             }
             
-            resp_data = self._get_json(url, params=params, headers=headers, timeout=10)
-            
-            if resp_data.get("data"):
-                result = []
-                for bk in resp_data["data"]["diff"]:
+            result = []
+            seen_codes = set()
+            total_count = None
+            max_pages = 50
+
+            for page in range(1, max_pages + 1):
+                params = {**base_params, "pn": str(page), "pz": str(page_size)}
+                query = urlencode(params, safe=":+,!")
+                resp_data = self._get_json(f"{url}?{query}", headers=headers, timeout=10)
+                data_node = resp_data.get("data") or {}
+                if total_count is None:
+                    total_count = int(self._safe_float(data_node.get("total"), 0))
+
+                diff = data_node.get("diff") or []
+                if isinstance(diff, dict):
+                    diff = list(diff.values())
+                if not diff:
+                    break
+                for bk in diff:
+                    code = bk.get("f12") or bk.get("code") or bk.get("f14")
+                    if not str(code).startswith("BK"):
+                        continue
+                    if code in seen_codes:
+                        continue
+                    seen_codes.add(code)
                     # 主力净流入（转换为亿）
                     main_inflow = self._safe_float(bk.get("f62", 0))
-                    main_inflow_str = f"{round(main_inflow / 100000000, 2)}亿" if main_inflow else "0亿"
+                    main_inflow_str = self._format_amount_yi(main_inflow)
                     
                     # 小单净流入（转换为亿）
                     small_inflow = self._safe_float(bk.get("f84", 0))
-                    small_inflow_str = f"{round(small_inflow / 100000000, 2)}亿" if small_inflow else "0亿"
+                    small_inflow_str = self._format_amount_yi(small_inflow)
                     
                     result.append({
                         "name": bk.get("f14", ""),
-                        "change_pct": f"{self._safe_float(bk.get('f3', 0))}%",
+                        "change_pct": self._format_pct(bk.get('f3', 0)),
                         "main_inflow": main_inflow_str,
-                        "main_inflow_pct": f"{round(self._safe_float(bk.get('f184', 0)), 2)}%",
+                        "main_inflow_pct": self._format_pct(bk.get('f184', 0)),
                         "small_inflow": small_inflow_str,
-                        "small_inflow_pct": f"{round(self._safe_float(bk.get('f87', 0)), 2)}%",
+                        "small_inflow_pct": self._format_pct(bk.get('f87', 0)),
                         "raw_change": self._safe_float(bk.get('f3', 0)),
                         "raw_main_inflow": main_inflow
                     })
                 
                 # 按涨跌幅排序
+                target_count = min(limit, total_count or limit)
+                if len(result) >= target_count:
+                    break
+                if not total_count and len(diff) < page_size:
+                    break
+
+            if result:
                 result.sort(key=lambda x: x['raw_change'], reverse=True)
-                
+                result = result[:limit]
+
+                if self._is_valid_sector_rank(result):
+                    data = {
+                        "success": True,
+                        "data": result,
+                        "total_count": total_count or len(result),
+                        "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "data_date": data_date,
+                        "is_stale": is_stale,
+                        "source": "eastmoney"
+                    }
+                    self._set_cache(cache_key, data, 'sector_rank')
+                    self._save_sector_rank_file_cache(data)
+                    return data
+
+            # === East Money 返回了数据但验证无效，尝试 akshare 备用 ===
+            akshare_rows = self._get_sector_rank_akshare(limit)
+            if akshare_rows:
                 data = {
                     "success": True,
-                    "data": result,
-                    "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "data": akshare_rows,
+                    "total_count": len(akshare_rows),
+                    "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "data_date": data_date,
+                    "is_stale": is_stale,
+                    "source": "akshare"
                 }
                 self._set_cache(cache_key, data, 'sector_rank')
+                self._save_sector_rank_file_cache(data)
                 return data
-            
+
             stale = self._get_stale_cache(cache_key)
             if stale and stale.get("data"):
-                stale = {**stale, "source": "stale_cache"}
+                stale = {**stale, "source": "stale_cache", "is_stale": True, "data_date": stale.get("data_date") or data_date}
                 return stale
-            fallback = self._get_sector_rank_fallback(limit)
-            if fallback:
-                data = {
-                    "success": True,
-                    "data": fallback,
-                    "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "source": "fallback"
-                }
-                self._set_cache(cache_key, data, 'sector_rank')
-                return data
+            file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=False)
+            if file_cached:
+                self._set_cache(cache_key, file_cached, 'sector_rank')
+                return file_cached
             return {"success": False, "error": "获取板块数据失败", "data": []}
-        
+
         except Exception as e:
-            stale = self._get_stale_cache(cache_key)
-            if stale and stale.get("data"):
-                stale = {**stale, "source": "stale_cache"}
-                return stale
-            fallback = self._get_sector_rank_fallback(limit)
-            if fallback:
+            # === East Money 请求异常，尝试 akshare 备用 ===
+            akshare_rows = self._get_sector_rank_akshare(limit)
+            if akshare_rows:
                 data = {
                     "success": True,
-                    "data": fallback,
+                    "data": akshare_rows,
+                    "total_count": len(akshare_rows),
                     "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "source": "fallback"
+                    "data_date": data_date,
+                    "is_stale": is_stale,
+                    "source": "akshare_fallback"
                 }
                 self._set_cache(cache_key, data, 'sector_rank')
+                self._save_sector_rank_file_cache(data)
                 return data
+
+            stale = self._get_stale_cache(cache_key)
+            if stale and stale.get("data"):
+                stale = {**stale, "source": "stale_cache", "is_stale": True, "data_date": stale.get("data_date") or data_date}
+                return stale
+            file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=False)
+            if file_cached:
+                self._set_cache(cache_key, file_cached, 'sector_rank')
+                return file_cached
             return {"success": False, "error": self._short_error(e), "data": []}
 
     def _get_sector_rank_fallback(self, limit: int = 50) -> list:
@@ -589,6 +808,15 @@ class FundMasterService:
                             "market": market,
                             "raw_change": 0.0
                         })
+
+                sina_result = self._get_market_index_sina()
+                if sina_result:
+                    sina_map = {item.get("name"): item for item in sina_result}
+                    result = [
+                        sina_map.get(item.get("name"), item)
+                        if item.get("price") in ("", "-", None) else item
+                        for item in result
+                    ]
             
             # 如果东方财富也失败，尝试新浪财经作为备选
             if not result:
@@ -631,6 +859,7 @@ class FundMasterService:
             ("sz399005", "中小100", "A股"),
             ("hkHSI", "恒生指数", "港股"),
             ("hkHSCEI", "国企指数", "港股"),
+            ("hkHSTECH", "恒生科技", "港股"),
             ("gb_ixic", "纳斯达克", "美股"),
             ("gb_dji", "道琼斯", "美股"),
             ("gb_inx", "标普500", "美股"),
@@ -1039,6 +1268,14 @@ class FundMasterService:
             }
         return {"success": False, "error": "获取上证指数数据失败", "data": []}
     
+    def _get_sector_rank_via_service(self, limit: int = 500) -> dict:
+        """通过新 MarketDataService 获取板块（兼容旧调用方）"""
+        try:
+            from services.market_data import get_market_data_service as get_mds
+            return get_mds().get_industry_boards(page_size=limit)
+        except Exception:
+            return self.get_sector_rank(limit=limit)
+
     # ==================== 汇总数据接口 ====================
     def get_market_overview(self) -> dict:
         """
@@ -1051,7 +1288,7 @@ class FundMasterService:
             "success": True,
             "market_index": self.get_market_index(),
             "gold_realtime": self.get_gold_realtime(),
-            "sector_rank": self.get_sector_rank(limit=20),
+            "sector_rank": self._get_sector_rank_via_service(limit=500),
             "a_volume_7days": self.get_a_volume_7days(),
             "sse_30min": self.get_sse_30min(),
             "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

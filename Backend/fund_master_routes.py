@@ -36,11 +36,17 @@ def get_flash_news():
 def get_sector_rank():
     """
     获取行业板块排行
-    GET /api/market/sectors?limit=50
+
+    GET /api/market/sectors?limit=500
+
+    数据流：路由 → MarketDataService → EastMoney Provider → 17.push2.eastmoney.com
+    失败时自动降级 akshare（同花顺）→ 文件缓存。
     """
-    limit = request.args.get('limit', 50, type=int)
-    service = get_fund_master_service()
-    return jsonify(service.get_sector_rank(limit=limit))
+    limit = request.args.get('limit', 500, type=int)
+    from services.market_data import get_market_data_service as get_mds
+    mds = get_mds()
+    result = mds.get_industry_boards(page_size=limit)
+    return jsonify(result)
 
 
 @fund_master_bp.route('/index', methods=['GET'])

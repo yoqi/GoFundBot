@@ -92,7 +92,7 @@
         <!-- 右侧：快讯 + 板块（显示详情/对比时隐藏） -->
         <aside class="dashboard-right" v-if="!showFullContent">
           <FlashNews :count="30" :refreshInterval="30000" />
-          <SectorRank :limit="50" :initialDisplay="12" />
+          <SectorRank :limit="500" />
         </aside>
       </div>
 

@@ -163,16 +163,35 @@ class MarketDataService:
         return None
     
     def _fetch_em_json(self, url: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+        """获取东方财富 JSON 数据，依次尝试多种网络会话"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://quote.eastmoney.com/"
+        }
+        errors = []
+
+        # 会话1: 使用系统代理（匹配浏览器行为）
+        s1 = requests.Session()
+        s1.trust_env = True
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            resp = requests.get(url, params=params or {}, headers=headers, timeout=8)
+            resp = s1.get(url, params=params or {}, headers=headers, timeout=8, verify=False)
             if resp.status_code == 200:
                 return resp.json()
-            logger.warning(f"[市场数据] EM {url} 返回状态 {resp.status_code}")
         except Exception as e:
-            logger.error(f"[市场数据] EM 请求失败: {e}")
+            errors.append(str(e)[:80])
+
+        # 会话2: 不使用系统代理
+        s2 = requests.Session()
+        s2.trust_env = False
+        try:
+            resp = s2.get(url, params=params or {}, headers=headers, timeout=8, verify=False)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            errors.append(str(e)[:80])
+
+        if errors:
+            logger.warning(f"[市场数据] EM {url} 请求失败: {'; '.join(errors)}")
         return None
     
     def _safe_float(self, val, default=0.0):
