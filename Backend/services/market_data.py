@@ -1,4 +1,10 @@
 # -*- coding: utf-8 -*-
+# DEPRECATED:
+# This module is kept as fallback during the DataService migration.
+# New external financial data access should be implemented in DataService providers.
+# Do not add new third-party data source calls here.
+# Target replacement: DataService marketService / EastMoneyMarketProvider.
+
 """
 市场数据统一服务层
 
@@ -15,6 +21,7 @@
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from datetime import datetime
@@ -26,6 +33,16 @@ from providers import tencent as tx
 from symbols import to_board_secid, to_eastmoney_secid, to_exchange_code
 
 logger = logging.getLogger(__name__)
+
+
+def _akshare_disabled() -> bool:
+    """Check if akshare fallback should be skipped.
+
+    Set DISABLE_AKSHARE_FALLBACK=1 env var to bypass akshare.
+    """
+    if os.environ.get('DISABLE_AKSHARE_FALLBACK') == '1':
+        return True
+    return False
 
 
 class MarketDataService:
@@ -94,7 +111,7 @@ class MarketDataService:
         """
         获取行业板块列表
 
-        兜底顺序：内存缓存 → East Money API → akshare → 文件缓存 → 占位数据
+        兜底顺序：内存缓存 → 同花顺 (akshare) → 东方财富 API → 文件缓存 → 占位数据
         """
         cache_key = f"boards_{page}_{page_size}"
         if use_cache:
@@ -106,31 +123,16 @@ class MarketDataService:
         boards: List[Dict] = []
         source = ""
 
-        # 方案 1: East Money
+        # 同花顺 (akshare) —— 唯一数据源
         try:
-            all_boards = []
-            for p in range(1, 8):  # 最多 7 页（每页 100 条，共 ~700 个板块）
-                batch = em.get_industry_boards(page=p, page_size=100)
-                if not batch:
-                    break
-                all_boards.extend(batch)
-                if len(batch) < 100:
-                    break
-            all_boards.sort(key=lambda x: x.get("changePercent", 0), reverse=True)
-            boards = all_boards[:page_size]
-            source = "eastmoney"
-        except MarketDataError as exc:
-            logger.warning(f"[MarketData] East Money 板块列表失败: {exc}")
-
-        # 方案 2: akshare
-        if not boards:
-            try:
-                boards = self._get_boards_akshare(page_size)
+            boards = self._get_boards_akshare(page_size)
+            if boards:
                 source = "akshare"
-            except Exception as exc:
-                logger.warning(f"[MarketData] akshare 板块列表失败: {exc}")
+                logger.info(f"[MarketData] 同花顺板块数据获取成功，共 {len(boards)} 条")
+        except Exception as exc:
+            logger.warning(f"[MarketData] akshare 板块列表失败: {exc}")
 
-        # 方案 3: 缓存兜底
+        # 缓存兜底
         if not boards:
             stale = self._cache_get_stale(cache_key)
             if stale and stale.get("data"):
@@ -331,6 +333,8 @@ class MarketDataService:
 
     def _get_boards_akshare(self, limit: int) -> List[Dict]:
         """通过 akshare 获取板块（备选），提取包括主力资金在内的全部可用字段"""
+        if _akshare_disabled():
+            return []
         try:
             import akshare as ak
         except ImportError:
@@ -380,6 +384,8 @@ class MarketDataService:
 
     def _get_constituents_akshare(self, board_code: str, limit: int) -> List[Dict]:
         """通过 akshare 获取板块成份股（备选）"""
+        if _akshare_disabled():
+            return []
         try:
             import akshare as ak
         except ImportError:
@@ -477,8 +483,6 @@ def _board_to_legacy(b: Dict[str, Any]) -> Dict[str, Any]:
         "change_pct": f"{round(raw_change, 2)}%",
         "main_inflow": _format_amount_yi(raw_inflow),
         "main_inflow_pct": f"{round(inflow_pct, 2)}%",
-        "small_inflow": "0亿",
-        "small_inflow_pct": "0.00%",
         "raw_change": raw_change,
         "raw_main_inflow": raw_inflow,
         "rise_count": b.get("riseCount", 0),

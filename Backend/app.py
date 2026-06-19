@@ -8,11 +8,15 @@ from fund_api import FundAPI
 from fund_list_cache import get_fund_list_cache
 from ai_service import get_ai_service
 from fund_master_routes import fund_master_bp
+from data_service_routes import data_service_bp
+from services.data_service_client import DataServiceError, get_data_service_client
+from services.data_service_legacy_mapper import map_data_service_detail_to_legacy
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc, and_, or_, func
 from datetime import datetime, timedelta
 import json
 import math
+import os
 import threading
 import time
 import re
@@ -23,6 +27,94 @@ CORS(app)  # 允许跨域请求
 
 # 注册市场数据 Blueprint
 app.register_blueprint(fund_master_bp)
+app.register_blueprint(data_service_bp)
+
+# ---------------------------------------------------------------------------
+# DataService detail helpers (gray-release)
+# ---------------------------------------------------------------------------
+
+def _validate_data_service_fund_quality(mapped_data: dict):
+    """Quality gate for DataService-mapped fund detail.
+
+    Returns (passed: bool, issues: list[str]).
+    Checks that critical fields exist and have meaningful data.
+    """
+    issues = []
+
+    # 1. basic_info
+    bi = mapped_data.get('basic_info', {}) or {}
+    if not bi.get('fund_code'):
+        issues.append('basic_info.fund_code missing')
+    if not bi.get('fund_name'):
+        issues.append('basic_info.fund_name missing')
+
+    # 2. realtime_estimate
+    est = mapped_data.get('realtime_estimate', {}) or {}
+    if not est or est.get('missing'):
+        issues.append('realtime_estimate missing')
+
+    # 3. net_worth_trend non-empty
+    nw = mapped_data.get('net_worth_trend', [])
+    if not isinstance(nw, list) or len(nw) == 0:
+        issues.append('net_worth_trend empty')
+
+    # 4. portfolio stock_codes non-empty
+    pf = mapped_data.get('portfolio', {}) or {}
+    sc = pf.get('stock_codes', []) if isinstance(pf, dict) else []
+    if not isinstance(sc, list) or len(sc) == 0:
+        issues.append('portfolio.stock_codes empty')
+
+    # 5. risk_metrics has at least some values
+    rm = mapped_data.get('risk_metrics', {}) or {}
+    rm_values = sum(1 for v in rm.values() if v is not None) if isinstance(rm, dict) else 0
+    if rm_values == 0:
+        issues.append('risk_metrics has no valid values')
+
+    # 6. performance has core return fields
+    perf = mapped_data.get('performance', {}) or {}
+    has_perf = any(
+        perf.get(k) is not None
+        for k in ('1_year_return', '1_month_return', '3_month_return', '6_month_return')
+    )
+    if not has_perf:
+        issues.append('performance missing core return fields')
+
+    # 7. asset_allocation present
+    aa = mapped_data.get('asset_allocation', {}) or {}
+    if not aa or aa.get('missing'):
+        issues.append('asset_allocation missing')
+
+    passed = len(issues) == 0
+    return passed, issues
+
+
+def _get_fund_detail_from_data_service(fund_code: str) -> dict:
+    """Fetch fund detail from DataService and map to legacy structure."""
+    client = get_data_service_client()
+    ds_payload = client.get_fund_detail(fund_code)
+    result = map_data_service_detail_to_legacy(ds_payload)
+    result['_data_source'] = {
+        "mode": "data_service",
+        "mapped": True,
+        "completeness_score": 70,
+        "replacement_tier": "tier2_gray_validation"
+    }
+    return result
+
+
+def _try_data_service_fund_detail(fund_code: str):
+    """Try DataService detail; return (mapped_data, quality_passed, issues) or None."""
+    try:
+        mapped = _get_fund_detail_from_data_service(fund_code)
+        passed, issues = _validate_data_service_fund_quality(mapped)
+        return mapped, passed, issues
+    except DataServiceError as e:
+        print(f"auto mode: DataService failed for {fund_code}, fallback to legacy: {e}")
+        return None
+    except Exception as e:
+        print(f"auto mode: unexpected error for {fund_code}, fallback to legacy: {e}")
+        return None
+
 
 def get_db():
     if 'db' not in g:
@@ -198,12 +290,35 @@ def hello():
 
 @app.route('/api/fund/search', methods=['GET'])
 def search_funds():
-    """根据关键词搜索基金列表（使用本地缓存）"""
+    """Search funds by keyword – DataService first, local cache fallback."""
     keyword = request.args.get('q', '')
     if not keyword:
         return jsonify({"error": "Keyword is required"}), 400
-    
-    # 使用本地缓存搜索
+
+    # 1) Try DataService first
+    try:
+        ds_payload = get_data_service_client().search_funds(keyword)
+        ds_data = ds_payload.get('data', {}) if isinstance(ds_payload, dict) else {}
+        ds_items = ds_data.get('items', []) if isinstance(ds_data, dict) else []
+
+        if ds_items:
+            # Map DataService DTO back to Frontend-expected format
+            funds = []
+            for item in ds_items:
+                if not isinstance(item, dict):
+                    continue
+                funds.append({
+                    'CODE': item.get('code', ''),
+                    'NAME': item.get('name', ''),
+                    'TYPE': item.get('type', ''),
+                    'PINYIN': item.get('pinyin', ''),
+                })
+            print(f"fund search: DataService success, {len(funds)} results for '{keyword}'")
+            return jsonify({"data": funds})
+    except DataServiceError as e:
+        print(f"fund search: DataService unavailable, fallback to local cache: {e}")
+
+    # 2) Fallback to local cache
     funds = fund_list_cache.search(keyword, limit=20)
     return jsonify({"data": funds})
 
@@ -234,9 +349,50 @@ def get_fund_detail(fund_code):
     """
     fund_code = _normalize_fund_code(fund_code)
     if not fund_code:
-        return jsonify({"error": "Fund code is required"}), 400    
+        return jsonify({"error": "Fund code is required"}), 400
+
+    # --- Gray-release source parameter ---
+    # Priority: URL param > FUND_DEFAULT_SOURCE env > 'legacy'
+    source = request.args.get('source', '').strip().lower()
+    if not source:
+        source = os.environ.get('FUND_DEFAULT_SOURCE', 'legacy').strip().lower()
+
+    if source not in ('legacy', 'data_service', 'auto'):
+        return jsonify({
+            "success": False,
+            "error": "Invalid source. Use legacy, data_service, or auto."
+        }), 400
+
+    # source=data_service: DataService only, no fallback
+    if source == 'data_service':
+        result = _get_fund_detail_from_data_service(fund_code)
+        return jsonify(result)
+
+    # source=auto: DataService first with quality gate, fallback to legacy
+    auto_fallback = False
+    if source == 'auto':
+        ds_try = _try_data_service_fund_detail(fund_code)
+        if ds_try is not None:
+            ds_result, quality_passed, quality_issues = ds_try
+            if quality_passed:
+                ds_result['_data_source'] = {
+                    "mode": "auto",
+                    "used": "data_service",
+                    "fallback": False,
+                    "quality_passed": True,
+                    "quality_issues": []
+                }
+                return jsonify(ds_result)
+            else:
+                # Quality gate failed – fallback to legacy
+                print(f"auto mode: quality gate failed for {fund_code}: {quality_issues}")
+                auto_fallback = True
+        else:
+            # DataService request/mapping failed
+            auto_fallback = True
+
     db = get_db() # 获取数据库会话
-    
+
     # 使用新的 get_fund_data 方法获取清洗后的完整数据
     fund_data = fund_api.get_fund_data(fund_code)
     
@@ -391,6 +547,16 @@ def get_fund_detail(fund_code):
         except Exception as e:
             print(f"Error saving to database: {e}")
             db.rollback()
+
+        # Add debug meta for auto-fallback mode
+        if auto_fallback:
+            fund_data["_data_source"] = {
+                "mode": "auto",
+                "used": "legacy",
+                "fallback": True,
+                "quality_passed": False,
+                "quality_issues": ["quality gate not passed — using legacy fallback"]
+            }
 
         return jsonify(fund_data)
     
@@ -547,7 +713,28 @@ def get_watchlist():
     funds_data = []
     for item in watchlist:
         estimate = db.query(FundEstimate).filter(FundEstimate.fund_code == item.fund_code).first()
-        
+
+        net_worth = estimate.net_worth if estimate else None
+        net_worth_date = estimate.net_worth_date if estimate else None
+
+        # 兜底：FundTrend 存储 pingzhongdata 的净值走势 JSON，
+        # 解析取最新净值，如果比 FundEstimate (fundgz) 更新就覆盖
+        try:
+            trend = db.query(FundTrend).filter(FundTrend.fund_code == item.fund_code).first()
+            if trend and trend.net_worth_trend_json:
+                trend_data = json.loads(trend.net_worth_trend_json)
+                if isinstance(trend_data, list) and trend_data:
+                    last = trend_data[-1]
+                    if isinstance(last, dict):
+                        t_nw = last.get('net_worth')
+                        t_date = last.get('date')
+                        if t_nw is not None and t_date is not None:
+                            if not net_worth_date or str(t_date) > str(net_worth_date):
+                                net_worth = str(t_nw)
+                                net_worth_date = str(t_date)
+        except Exception:
+            pass
+
         fund_data = {
             'fund_code': item.fund_code,
             'fund_name': item.fund_name,
@@ -555,8 +742,8 @@ def get_watchlist():
             'group_id': item.group_id,
             'sort_order': item.sort_order,
             'created_time': item.created_time.isoformat() if item.created_time else None,
-            'net_worth': estimate.net_worth if estimate else None,
-            'net_worth_date': estimate.net_worth_date if estimate else None,
+            'net_worth': net_worth,
+            'net_worth_date': net_worth_date,
             'estimate_value': estimate.estimate_value if estimate else None,
             'estimate_change': estimate.estimate_change if estimate else None,
             'estimate_time': estimate.estimate_time if estimate else None
@@ -845,7 +1032,121 @@ def move_fund_to_group():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/watchlist/refresh-estimates', methods=['POST'])
+def _value_to_string(value):
+    if value is None:
+        return None
+    return str(value)
+
+
+def _upsert_fund_estimate(
+    db,
+    fund_code,
+    name=None,
+    net_worth=None,
+    net_worth_date=None,
+    estimate_value=None,
+    estimate_change=None,
+    estimate_time=None,
+):
+    estimate_record = db.query(FundEstimate).filter(
+        FundEstimate.fund_code == fund_code
+    ).first()
+
+    if estimate_record:
+        estimate_record.name = name
+        # 只有净值日期更新时才覆盖（防止 fundgz CDN 返回旧数据覆盖新数据）
+        if net_worth_date and (not estimate_record.net_worth_date or str(net_worth_date) >= str(estimate_record.net_worth_date)):
+            estimate_record.net_worth = net_worth
+            estimate_record.net_worth_date = net_worth_date
+        estimate_record.estimate_value = estimate_value
+        estimate_record.estimate_change = estimate_change
+        estimate_record.estimate_time = estimate_time
+    else:
+        estimate_record = FundEstimate(
+            fund_code=fund_code,
+            name=name,
+            net_worth=net_worth,
+            net_worth_date=net_worth_date,
+            estimate_value=estimate_value,
+            estimate_change=estimate_change,
+            estimate_time=estimate_time
+        )
+        db.add(estimate_record)
+
+    return {
+        'fund_code': fund_code,
+        'estimate_value': estimate_value,
+        'estimate_change': estimate_change,
+        'estimate_time': estimate_time,
+        'net_worth': net_worth,
+        'net_worth_date': net_worth_date
+    }
+
+
+def _upsert_data_service_estimate(db, fund_code, estimate_data):
+    return _upsert_fund_estimate(
+        db,
+        fund_code,
+        name=estimate_data.get('name'),
+        net_worth=_value_to_string(estimate_data.get('nav')),
+        net_worth_date=estimate_data.get('navDate'),
+        estimate_value=_value_to_string(estimate_data.get('estimatedNav')),
+        estimate_change=_value_to_string(estimate_data.get('estimatedChangePercent')),
+        estimate_time=estimate_data.get('estimateTime')
+    )
+
+
+def _refresh_fundgz_estimate(db, fund_code):
+    real_time_url = f"http://fundgz.1234567.com.cn/js/{fund_code}.js"
+    response = requests.get(real_time_url, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }, timeout=3)
+
+    if response.status_code != 200:
+        return None
+
+    match = re.search(r"jsonpgz\((.*?)\);", response.text)
+    if not match:
+        return None
+
+    rt_data = json.loads(match.group(1))
+    if not rt_data:
+        return None
+
+    net_worth = rt_data.get('dwjz')
+    net_worth_date = rt_data.get('jzrq')
+
+    # 兜底：如果 fundgz CDN 延迟，从 FundTrend JSON 取最新的净值
+    # FundTrend 在查看详情页时由 pingzhongdata 写入，更新更及时
+    try:
+        trend = db.query(FundTrend).filter(FundTrend.fund_code == fund_code).first()
+        if trend and trend.net_worth_trend_json:
+            trend_data = json.loads(trend.net_worth_trend_json)
+            if isinstance(trend_data, list) and trend_data:
+                last = trend_data[-1]
+                if isinstance(last, dict):
+                    t_nw = last.get('net_worth')
+                    t_date = last.get('date')
+                    if t_nw is not None and t_date is not None:
+                        if not net_worth_date or str(t_date) > str(net_worth_date):
+                            net_worth = str(t_nw)
+                            net_worth_date = str(t_date)
+    except Exception:
+        pass  # FundTrend 可能没有数据，不影响
+
+    return _upsert_fund_estimate(
+        db,
+        fund_code,
+        name=rt_data.get('name'),
+        net_worth=net_worth,
+        net_worth_date=net_worth_date,
+        estimate_value=rt_data.get('gsz'),
+        estimate_change=rt_data.get('gszzl'),
+        estimate_time=rt_data.get('gztime')
+    )
+
+
+@app.route('/api/watchlist/refresh-estimates', methods=['GET', 'POST'])
 def refresh_watchlist_estimates():
     """
     批量刷新自选基金的实时估值数据
@@ -861,58 +1162,71 @@ def refresh_watchlist_estimates():
     fund_codes = [item.fund_code for item in watchlist]
     updated_count = 0
     results = []
+    data_service_success_count = 0
+    data_service_failed_count = 0
+    fallback_success_count = 0
+    fallback_failed_count = 0
+    fallback_codes = list(fund_codes)
+
+    try:
+        data_service_payload = get_data_service_client().get_fund_estimates(fund_codes)
+        ds_data = data_service_payload.get('data', {}) if isinstance(data_service_payload, dict) else {}
+
+        # New format: data.items (successes) + data.failed (failures)
+        ds_items = ds_data.get('items', []) if isinstance(ds_data, dict) else []
+        ds_failed = ds_data.get('failed', []) if isinstance(ds_data, dict) else []
+
+        successful_codes = set()
+
+        # Process successful items
+        for item in ds_items:
+            if not isinstance(item, dict):
+                continue
+            fund_code = item.get('code')
+            if fund_code not in fund_codes:
+                continue
+            if isinstance(item.get('data'), dict):
+                results.append(_upsert_data_service_estimate(db, fund_code, item['data']))
+                successful_codes.add(fund_code)
+                data_service_success_count += 1
+                updated_count += 1
+
+        # Track explicitly failed items from DataService
+        for item in ds_failed:
+            if not isinstance(item, dict):
+                continue
+            fund_code = item.get('code')
+            if fund_code and fund_code in fund_codes:
+                data_service_failed_count += 1
+
+        fallback_codes = [code for code in fund_codes if code not in successful_codes]
+    except DataServiceError as e:
+        data_service_failed_count = len(fund_codes)
+        fallback_codes = list(fund_codes)
+        print(f"DataService batch estimate unavailable, fallback to fundgz: {e}")
     
-    for fund_code in fund_codes:
+    for fund_code in fallback_codes:
         try:
             # 只获取实时估值数据（轻量级请求）
-            real_time_url = f"http://fundgz.1234567.com.cn/js/{fund_code}.js"
-            response = requests.get(real_time_url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }, timeout=3)
+            fallback_result = _refresh_fundgz_estimate(db, fund_code)
             
-            if response.status_code == 200:
-                match = re.search(r"jsonpgz\((.*?)\);", response.text)
-                if match:
-                    rt_data = json.loads(match.group(1))
-                    if rt_data:
-                        # 更新数据库中的估值信息
-                        estimate_record = db.query(FundEstimate).filter(
-                            FundEstimate.fund_code == fund_code
-                        ).first()
-                        
-                        if estimate_record:
-                            estimate_record.name = rt_data.get('name')
-                            estimate_record.net_worth = rt_data.get('dwjz')
-                            estimate_record.net_worth_date = rt_data.get('jzrq')
-                            estimate_record.estimate_value = rt_data.get('gsz')
-                            estimate_record.estimate_change = rt_data.get('gszzl')
-                            estimate_record.estimate_time = rt_data.get('gztime')
-                        else:
-                            estimate_record = FundEstimate(
-                                fund_code=fund_code,
-                                name=rt_data.get('name'),
-                                net_worth=rt_data.get('dwjz'),
-                                net_worth_date=rt_data.get('jzrq'),
-                                estimate_value=rt_data.get('gsz'),
-                                estimate_change=rt_data.get('gszzl'),
-                                estimate_time=rt_data.get('gztime')
-                            )
-                            db.add(estimate_record)
-                        
-                        updated_count += 1
-                        results.append({
-                            'fund_code': fund_code,
-                            'estimate_value': rt_data.get('gsz'),
-                            'estimate_change': rt_data.get('gszzl'),
-                            'estimate_time': rt_data.get('gztime'),
-                            'net_worth': rt_data.get('dwjz'),
-                            'net_worth_date': rt_data.get('jzrq')
-                        })
+            if fallback_result:
+                updated_count += 1
+                fallback_success_count += 1
+                results.append(fallback_result)
         except Exception as e:
             # 单个基金失败不影响其他
             print(f"刷新 {fund_code} 估值失败: {e}")
             continue
-    
+    fallback_failed_count = max(0, len(fallback_codes) - fallback_success_count)
+    print(
+        "refresh_watchlist_estimates: "
+        f"data_service_success={data_service_success_count}, "
+        f"data_service_failed={data_service_failed_count}, "
+        f"fallback_success={fallback_success_count}, "
+        f"fallback_failed={fallback_failed_count}"
+    )
+
     try:
         db.commit()
     except Exception as e:
@@ -923,6 +1237,10 @@ def refresh_watchlist_estimates():
         'message': f'Updated {updated_count} funds',
         'updated': updated_count,
         'total': len(fund_codes),
+        'data_service_success': data_service_success_count,
+        'data_service_failed': data_service_failed_count,
+        'fallback_success': fallback_success_count,
+        'fallback_failed': fallback_failed_count,
         'data': results
     })
 
@@ -2554,4 +2872,4 @@ def serve_frontend(path):
     return send_from_directory(static_dir, 'index.html')
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)

@@ -50,21 +50,24 @@
       </div>
 
       <div class="header-right">
-        <!-- 涨跌幅单独展示 -->
+        <!-- 涨跌幅：净值更新后显示实际涨跌，盘中显示估算涨跌 -->
         <div class="change-box">
-          <div class="label">估算涨幅</div>
-          <div class="value" :class="getChangeClass(fundInfo.gszzl)">
-            {{ fundInfo.gszzl ? (fundInfo.gszzl > 0 ? '+' : '') + fundInfo.gszzl + '%' : '--' }}
+          <div class="label">{{ isEstimateFresh ? '估算涨幅' : '涨跌幅' }}</div>
+          <div class="value" :class="getChangeClass(isEstimateFresh ? fundInfo.gszzl : fundInfo.actualChange)">
+            {{ displayChange }}
           </div>
+          <div v-if="!isEstimateFresh && fundInfo.jzrq" class="date">{{ formatDate(fundInfo.jzrq) }}</div>
         </div>
-        
+
+        <!-- 单位净值：净值更新后为主展示，盘中为参考 -->
         <div class="net-worth-box">
-          <div class="label">单位净值</div>
+          <div class="label">单位净值{{ isEstimateFresh ? '（最新）' : '' }}</div>
           <div class="value">{{ fundInfo.dwjz || '--' }}</div>
           <div class="date">{{ formatDate(fundInfo.jzrq) }}</div>
         </div>
-        
-        <div class="estimate-box">
+
+        <!-- 估算净值：仅在盘中有新鲜估值时展示 -->
+        <div v-if="isEstimateFresh" class="estimate-box">
           <div class="label">估算净值</div>
           <div class="value" :class="getChangeClass(fundInfo.gszzl)">
             {{ fundInfo.gsz || '--' }}
@@ -142,6 +145,27 @@ export default {
       watchlistLoading: false
     }
   },
+  computed: {
+    // 判断盘中估值是否比已公布净值更新（盘中且净值未更新）
+    isEstimateFresh() {
+      if (!this.fundInfo) return false
+      const estimate = parseFloat(this.fundInfo.gsz)
+      if (isNaN(estimate) || estimate <= 0) return false
+      if (!this.fundInfo.gztime || !this.fundInfo.jzrq) return false
+      // 比较日期部分：估值日期 > 净值日期 → 盘中估值更新鲜
+      const estDate = String(this.fundInfo.gztime).substring(0, 10)
+      const navDate = String(this.fundInfo.jzrq).substring(0, 10)
+      return estDate > navDate
+    },
+    // 显示涨跌幅（盘中用估算涨跌，净值更新后显示实际涨跌）
+    displayChange() {
+      const value = this.isEstimateFresh ? this.fundInfo.gszzl : this.fundInfo.actualChange
+      if (value === null || value === undefined || value === '') return '--'
+      const num = parseFloat(value)
+      if (isNaN(num)) return '--'
+      return (num > 0 ? '+' : '') + num.toFixed(2) + '%'
+    }
+  },
   watch: {
     // 监听父组件传递的数据
     fundData: {
@@ -215,6 +239,18 @@ export default {
     // 处理基金数据（可来自父组件传递或自己请求）
     processFundData(data) {
       const realtime = data.realtime_estimate || {}
+
+      // 从净值走势中计算实际日涨跌幅（对比最近两个净值）
+      let actualChange = null
+      const trend = data.net_worth_trend || []
+      if (trend.length >= 2) {
+        const latest = parseFloat(trend[trend.length - 1]?.net_worth)
+        const previous = parseFloat(trend[trend.length - 2]?.net_worth)
+        if (latest > 0 && previous > 0) {
+          actualChange = ((latest - previous) / previous * 100)
+        }
+      }
+
       this.fundInfo = {
         ...data,
         ...data.basic_info,
@@ -234,7 +270,9 @@ export default {
         jzrq: realtime.net_worth_date,     // 净值日期
         gsz: realtime.estimate_value,       // 估算净值
         gszzl: realtime.estimate_change,    // 估算涨跌幅
-        gztime: realtime.estimate_time      // 估值时间
+        gztime: realtime.estimate_time,     // 估值时间
+        // 实际日涨跌幅（基于已公布净值计算）
+        actualChange: actualChange
       }
     },
     async fetchFundInfo() {
@@ -444,6 +482,7 @@ export default {
   line-height: 1.2;
 }
 
+.change-box .date,
 .net-worth-box .date,
 .estimate-box .time {
   font-size: 11px;

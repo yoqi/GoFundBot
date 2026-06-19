@@ -283,8 +283,11 @@ export default {
               fund.estimate_value = newEstimate.estimate_value
               fund.estimate_change = newEstimate.estimate_change
               fund.estimate_time = newEstimate.estimate_time
-              fund.net_worth = newEstimate.net_worth
-              fund.net_worth_date = newEstimate.net_worth_date
+              // 净值只在日期更新时覆盖，防止刷新接口返回旧数据
+              if (newEstimate.net_worth_date && (!fund.net_worth_date || String(newEstimate.net_worth_date) >= String(fund.net_worth_date))) {
+                fund.net_worth = newEstimate.net_worth
+                fund.net_worth_date = newEstimate.net_worth_date
+              }
             }
           })
           

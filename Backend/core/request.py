@@ -54,6 +54,88 @@ DEFAULT_HEADERS: Dict[str, str] = {
 }
 
 
+# ── East Money 熔断器 ────────────────────────────────────────────
+# East Money API 频繁连接失败时，跳过它直接使用备用数据源，
+# 避免每次请求都等待多层 session + curl_cffi 超时。
+
+class EastMoneyCircuitBreaker:
+    """East Money API 熔断器（模块级单例）"""
+
+    EASTMONEY_DOMAINS = [
+        "push2.eastmoney.com",
+        "push2his.eastmoney.com",
+        "17.push2.eastmoney.com",
+        "91.push2.eastmoney.com",
+        "29.push2.eastmoney.com",
+    ]
+
+    def __init__(self):
+        import threading
+        self._lock = threading.Lock()
+        self._consecutive_failures = 0
+        self._state = "closed"          # closed | open | half_open
+        self._open_time: float = 0.0
+        self.FAILURE_THRESHOLD = 3       # 连续失败 3 次触发熔断
+        self.RECOVERY_TIMEOUT = 300      # 5 分钟后尝试恢复
+
+    @staticmethod
+    def _is_eastmoney_url(url: str) -> bool:
+        return any(d in url for d in EastMoneyCircuitBreaker.EASTMONEY_DOMAINS)
+
+    def is_open(self, url: str = "") -> bool:
+        """检查熔断器是否打开（应跳过 East Money 调用）"""
+        if not self._is_eastmoney_url(url):
+            return False
+        with self._lock:
+            if self._state == "closed":
+                return False
+            if self._state == "open":
+                if time.time() - self._open_time >= self.RECOVERY_TIMEOUT:
+                    self._state = "half_open"
+                    logger.info("[CircuitBreaker] East Money 熔断器进入半开状态，尝试恢复")
+                    return False
+                return True
+            # half_open: 放行一次探测请求
+            return False
+
+    def record_success(self, url: str = ""):
+        """记录成功，闭合熔断器"""
+        if not self._is_eastmoney_url(url):
+            return
+        with self._lock:
+            was_open = self._state != "closed"
+            self._consecutive_failures = 0
+            self._state = "closed"
+            if was_open:
+                logger.info("[CircuitBreaker] East Money 熔断器已闭合，恢复正常")
+
+    def record_failure(self, url: str = ""):
+        """记录失败"""
+        if not self._is_eastmoney_url(url):
+            return
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self.FAILURE_THRESHOLD and self._state != "open":
+                self._state = "open"
+                self._open_time = time.time()
+                logger.warning(
+                    "[CircuitBreaker] East Money 熔断器打开 "
+                    f"（连续 {self._consecutive_failures} 次失败），"
+                    f"将在 {self.RECOVERY_TIMEOUT}s 后重试"
+                )
+
+
+# 模块级单例
+_circuit_breaker: Optional[EastMoneyCircuitBreaker] = None
+
+
+def get_eastmoney_circuit_breaker() -> EastMoneyCircuitBreaker:
+    global _circuit_breaker
+    if _circuit_breaker is None:
+        _circuit_breaker = EastMoneyCircuitBreaker()
+    return _circuit_breaker
+
+
 # ── 公共 API ────────────────────────────────────────────────────
 
 def get(
@@ -88,6 +170,14 @@ def get(
         MDConnectionError: 连接失败
         BadResponseError: 非 2xx 状态码
     """
+    # ── 熔断检查：East Money 不可用时快速失败 ──
+    cb = get_eastmoney_circuit_breaker()
+    if cb.is_open(url):
+        raise MDConnectionError(
+            "East Money 熔断器已打开，跳过请求",
+            source="circuit_breaker",
+        )
+
     _headers = {**DEFAULT_HEADERS}
     if referer:
         _headers["Referer"] = referer
@@ -95,6 +185,7 @@ def get(
         _headers.update(headers)
 
     errors: list[str] = []
+    is_em = cb._is_eastmoney_url(url)
 
     for attempt in range(max_retries + 1):
         # ── 尝试系统代理（匹配浏览器行为）──
@@ -118,6 +209,8 @@ def get(
                         verify=verify,
                     )
                 resp.raise_for_status()
+                if is_em:
+                    cb.record_success(url)
                 return resp
             except Exception as exc:
                 short = _short_reason(exc)
@@ -126,6 +219,8 @@ def get(
                     time.sleep(min(2 ** attempt, 4))
 
     # 所有尝试均失败 → 归一化错误
+    if is_em:
+        cb.record_failure(url)
     raise _normalize_error(errors)
 
 

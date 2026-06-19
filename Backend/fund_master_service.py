@@ -1,4 +1,10 @@
 # -*- coding: UTF-8 -*-
+# DEPRECATED:
+# This module is kept as fallback during the DataService migration.
+# New external financial data access should be implemented in DataService providers.
+# Do not add new third-party data source calls here.
+# Target replacement: DataService marketService / newsService / EastMoneyMarketProvider.
+
 """
 Fund-Master 核心功能服务模块
 移植自 fund-master/fund.py，提供实时市场数据获取能力
@@ -14,7 +20,10 @@ import time
 import threading
 import requests
 import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
+
+from core.request import get_eastmoney_circuit_breaker
 
 try:
     from curl_cffi import requests as curl_requests
@@ -60,6 +69,12 @@ class FundMasterService:
 
     def _get_json(self, url, params=None, headers=None, timeout=10):
         """获取 JSON 数据，依次尝试多种网络会话以适配不同网络环境"""
+        # ── 熔断检查：East Money 不可用时快速失败 ──
+        cb = get_eastmoney_circuit_breaker()
+        is_em = cb._is_eastmoney_url(url)
+        if is_em and cb.is_open(url):
+            raise Exception("East Money 熔断器已打开，跳过请求")
+
         errors = []
 
         # 构建多个会话按优先级尝试（env 代理优先，匹配浏览器行为）
@@ -81,6 +96,8 @@ class FundMasterService:
                     verify=False,
                 )
                 response.raise_for_status()
+                if is_em:
+                    cb.record_success(url)
                 return response.json()
             except Exception as exc:
                 errors.append(exc)
@@ -97,10 +114,14 @@ class FundMasterService:
                     impersonate="chrome"
                 )
                 response.raise_for_status()
+                if is_em:
+                    cb.record_success(url)
                 return response.json()
             except Exception as exc:
                 errors.append(exc)
 
+        if is_em:
+            cb.record_failure(url)
         raise errors[-1]
 
     def _short_error(self, error):
@@ -242,6 +263,9 @@ class FundMasterService:
         return f"{round(self._safe_float(value, 0.0), 2)}%"
 
     def _get_sector_rank_akshare(self, limit):
+        import os, sys
+        if os.environ.get('DISABLE_AKSHARE_FALLBACK') == '1':
+            return []
         try:
             import akshare as ak
             import pandas as pd
@@ -270,21 +294,23 @@ class FundMasterService:
                 change = row.get("涨跌幅")
                 if change is None:
                     change = row.get("涨幅") or row.get("涨跌幅/%")
-                inflow = row.get("主力净流入") or row.get("净额") or row.get("资金净流入") or 0
+                inflow = row.get("净流入") or row.get("主力净流入") or row.get("净额") or row.get("资金净流入") or 0
                 inflow_pct = row.get("主力净流入占比") or row.get("净占比") or 0
+                # akshare 同花顺的净流入单位已经是「亿」，直接格式化
+                inflow_val = self._safe_float(inflow, 0.0)
                 rows.append({
                     "name": str(name),
                     "change_pct": self._format_pct(change),
-                    "main_inflow": self._format_amount_yi(inflow),
+                    "main_inflow": f"{round(inflow_val, 2)}亿" if inflow_val else "0亿",
                     "main_inflow_pct": self._format_pct(inflow_pct),
-                    "small_inflow": "0亿",
-                    "small_inflow_pct": "0.00%",
                     "raw_change": self._safe_float(change, 0.0),
-                    "raw_main_inflow": self._safe_float(inflow, 0.0)
+                    "raw_main_inflow": inflow_val
                 })
             rows.sort(key=lambda x: x["raw_change"], reverse=True)
             if self._is_valid_sector_rank(rows):
+                print(f"[FundMaster] akshare 板块数据获取成功，共 {len(rows)} 条（来源: {fn_name}）")
                 return rows[:limit]
+        print("[FundMaster] akshare 板块数据获取失败或数据无效")
         return []
     
     # ==================== 7x24 快讯 ====================
@@ -525,12 +551,12 @@ class FundMasterService:
     # ==================== 行业板块排行 ====================
     def get_sector_rank(self, limit: int = 500) -> dict:
         """
-        获取行业板块排行（按主力净流入排序）
-        数据源：东方财富
-        
+        获取行业板块排行（按涨跌幅排序）
+        数据源：同花顺 (akshare)，失败时降级到文件缓存
+
         Args:
-            limit: 返回板块数量，默认50
-            
+            limit: 返回板块数量，默认500
+
         Returns:
             dict: {'success': bool, 'data': list, 'update_time': str}
         """
@@ -547,146 +573,32 @@ class FundMasterService:
                 self._set_cache(cache_key, file_cached, 'sector_rank')
                 return file_cached
 
-        try:
-            url = "https://push2.eastmoney.com/api/qt/clist/get"
-            page_size = min(max(limit, 20), 100)
-            base_params = {
-                "cb": "",
-                "fid": "f3",
-                "po": "1",
-                "np": "1",
-                "fltt": "2",
-                "invt": "2",
-                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                "fs": "m:90+t:2",
-                "fields": "f12,f14,f2,f3,f4,f5,f6,f7,f8,f9,f23,f62,f184"
+        # ── 同花顺 (akshare) —— 唯一数据源 ──
+        akshare_rows = self._get_sector_rank_akshare(limit)
+        if akshare_rows:
+            data = {
+                "success": True,
+                "data": akshare_rows,
+                "total_count": len(akshare_rows),
+                "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "data_date": data_date,
+                "is_stale": is_stale,
+                "source": "akshare"
             }
-            headers = {
-                "Referer": "https://quote.eastmoney.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-            }
-            
-            result = []
-            seen_codes = set()
-            total_count = None
-            max_pages = 50
+            self._set_cache(cache_key, data, 'sector_rank')
+            self._save_sector_rank_file_cache(data)
+            return data
 
-            for page in range(1, max_pages + 1):
-                params = {**base_params, "pn": str(page), "pz": str(page_size)}
-                query = urlencode(params, safe=":+,!")
-                resp_data = self._get_json(f"{url}?{query}", headers=headers, timeout=10)
-                data_node = resp_data.get("data") or {}
-                if total_count is None:
-                    total_count = int(self._safe_float(data_node.get("total"), 0))
-
-                diff = data_node.get("diff") or []
-                if isinstance(diff, dict):
-                    diff = list(diff.values())
-                if not diff:
-                    break
-                for bk in diff:
-                    code = bk.get("f12") or bk.get("code") or bk.get("f14")
-                    if not str(code).startswith("BK"):
-                        continue
-                    if code in seen_codes:
-                        continue
-                    seen_codes.add(code)
-                    # 主力净流入（转换为亿）
-                    main_inflow = self._safe_float(bk.get("f62", 0))
-                    main_inflow_str = self._format_amount_yi(main_inflow)
-                    
-                    # 小单净流入（转换为亿）
-                    small_inflow = self._safe_float(bk.get("f84", 0))
-                    small_inflow_str = self._format_amount_yi(small_inflow)
-                    
-                    result.append({
-                        "name": bk.get("f14", ""),
-                        "change_pct": self._format_pct(bk.get('f3', 0)),
-                        "main_inflow": main_inflow_str,
-                        "main_inflow_pct": self._format_pct(bk.get('f184', 0)),
-                        "small_inflow": small_inflow_str,
-                        "small_inflow_pct": self._format_pct(bk.get('f87', 0)),
-                        "raw_change": self._safe_float(bk.get('f3', 0)),
-                        "raw_main_inflow": main_inflow
-                    })
-                
-                # 按涨跌幅排序
-                target_count = min(limit, total_count or limit)
-                if len(result) >= target_count:
-                    break
-                if not total_count and len(diff) < page_size:
-                    break
-
-            if result:
-                result.sort(key=lambda x: x['raw_change'], reverse=True)
-                result = result[:limit]
-
-                if self._is_valid_sector_rank(result):
-                    data = {
-                        "success": True,
-                        "data": result,
-                        "total_count": total_count or len(result),
-                        "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "data_date": data_date,
-                        "is_stale": is_stale,
-                        "source": "eastmoney"
-                    }
-                    self._set_cache(cache_key, data, 'sector_rank')
-                    self._save_sector_rank_file_cache(data)
-                    return data
-
-            # === East Money 返回了数据但验证无效，尝试 akshare 备用 ===
-            akshare_rows = self._get_sector_rank_akshare(limit)
-            if akshare_rows:
-                data = {
-                    "success": True,
-                    "data": akshare_rows,
-                    "total_count": len(akshare_rows),
-                    "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "data_date": data_date,
-                    "is_stale": is_stale,
-                    "source": "akshare"
-                }
-                self._set_cache(cache_key, data, 'sector_rank')
-                self._save_sector_rank_file_cache(data)
-                return data
-
-            stale = self._get_stale_cache(cache_key)
-            if stale and stale.get("data"):
-                stale = {**stale, "source": "stale_cache", "is_stale": True, "data_date": stale.get("data_date") or data_date}
-                return stale
-            file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=False)
-            if file_cached:
-                self._set_cache(cache_key, file_cached, 'sector_rank')
-                return file_cached
-            return {"success": False, "error": "获取板块数据失败", "data": []}
-
-        except Exception as e:
-            # === East Money 请求异常，尝试 akshare 备用 ===
-            akshare_rows = self._get_sector_rank_akshare(limit)
-            if akshare_rows:
-                data = {
-                    "success": True,
-                    "data": akshare_rows,
-                    "total_count": len(akshare_rows),
-                    "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "data_date": data_date,
-                    "is_stale": is_stale,
-                    "source": "akshare_fallback"
-                }
-                self._set_cache(cache_key, data, 'sector_rank')
-                self._save_sector_rank_file_cache(data)
-                return data
-
-            stale = self._get_stale_cache(cache_key)
-            if stale and stale.get("data"):
-                stale = {**stale, "source": "stale_cache", "is_stale": True, "data_date": stale.get("data_date") or data_date}
-                return stale
-            file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=False)
-            if file_cached:
-                self._set_cache(cache_key, file_cached, 'sector_rank')
-                return file_cached
-            return {"success": False, "error": self._short_error(e), "data": []}
+        # ── 降级: 缓存 / 文件 / 占位 ──
+        stale = self._get_stale_cache(cache_key)
+        if stale and stale.get("data"):
+            stale = {**stale, "source": "stale_cache", "is_stale": True, "data_date": stale.get("data_date") or data_date}
+            return stale
+        file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=False)
+        if file_cached:
+            self._set_cache(cache_key, file_cached, 'sector_rank')
+            return file_cached
+        return {"success": False, "error": "获取板块数据失败", "data": []}
 
     def _get_sector_rank_fallback(self, limit: int = 50) -> list:
         """返回结构稳定的板块占位数据，避免外部数据源故障时前端整块不可用。"""
@@ -702,8 +614,6 @@ class FundMasterService:
                 "change_pct": "0.00%",
                 "main_inflow": "0亿",
                 "main_inflow_pct": "0.00%",
-                "small_inflow": "0亿",
-                "small_inflow_pct": "0.00%",
                 "raw_change": 0.0,
                 "raw_main_inflow": 0.0
             })
@@ -713,8 +623,8 @@ class FundMasterService:
     def get_market_index(self) -> dict:
         """
         获取市场指数汇总（A股主要指数 + 全球指数）
-        数据源：东方财富（更稳定）
-        
+        数据源：新浪财经 (Sina Finance)
+
         Returns:
             dict: {'success': bool, 'data': list, 'update_time': str}
         """
@@ -722,147 +632,46 @@ class FundMasterService:
         cached = self._get_cache(cache_key)
         if cached:
             return cached
-        
-        result = []
+
         try:
-            # 使用东方财富 API 获取主要指数
-            # A股/港股主要指数
-            a_share_indices = [
-                ("1.000001", "上证指数", "A股"),
-                ("0.399001", "深证成指", "A股"),
-                ("0.399006", "创业板指", "A股"),
-                ("0.399005", "中小100", "A股"),
-                ("1.000016", "上证50", "A股"),
-                ("1.000300", "沪深300", "A股"),
-                ("100.HSI", "恒生指数", "港股"),
-                ("100.HSCEI", "国企指数", "港股"),
-                ("100.HSTECH", "恒生科技", "港股"),
-            ]
-            
-            # 全球主要指数
-            global_indices = [
-                ("100.NDX", "纳斯达克100", "全球"),
-                ("100.DJIA", "道琼斯", "全球"),
-                ("100.SPX", "标普500", "全球"),
-                ("100.N225", "日经225", "全球"),
-                ("100.KS11", "韩国综合", "全球"),
-                ("100.FTSE", "英国富时100", "全球"),
-                ("100.GDAXI", "德国DAX", "全球"),
-                ("100.FCHI", "法国CAC40", "全球"),
-                ("100.SENSEX", "印度SENSEX", "全球"),
-            ]
-            
-            all_indices = a_share_indices + global_indices
-            codes = ",".join([idx[0] for idx in all_indices])
-            
-            url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
-            params = {
-                "fltt": "2",
-                "invt": "2", 
-                "fields": "f2,f3,f4,f12,f14",
-                "secids": codes,
-                "_": str(int(time.time() * 1000))
-            }
-            headers = {
-                "Referer": "https://quote.eastmoney.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            resp_data = self._get_json(url, params=params, headers=headers, timeout=10)
-            
-            if resp_data.get("data") and resp_data["data"].get("diff"):
-                idx_map = {idx[0].split(".")[1]: (idx[1], idx[2]) for idx in all_indices}
-                expected_names = {idx[1] for idx in all_indices}
-                
-                for item in resp_data["data"]["diff"]:
-                    code = item.get("f12", "")
-                    name_market = idx_map.get(code)
-                    if name_market:
-                        price = item.get("f2", "-")
-                        change_pct = item.get("f3", 0)
-                        
-                        # 格式化价格
-                        price_num = self._safe_float(price, None)
-                        if price_num is not None:
-                            price = f"{price_num:.2f}"
-                        
-                        # 格式化涨跌幅
-                        change_num = self._safe_float(change_pct, 0.0)
-                        change_pct_str = f"{'+' if change_num >= 0 else ''}{change_num:.2f}%"
-                        
-                        result.append({
-                            "name": name_market[0],
-                            "price": str(price),
-                            "change_pct": change_pct_str,
-                            "market": name_market[1],
-                            "raw_change": change_num
-                        })
-
-                returned_names = {item["name"] for item in result}
-                for _, name, market in all_indices:
-                    if name in expected_names and name not in returned_names:
-                        result.append({
-                            "name": name,
-                            "price": "-",
-                            "change_pct": "0.00%",
-                            "market": market,
-                            "raw_change": 0.0
-                        })
-
-                sina_result = self._get_market_index_sina()
-                if sina_result:
-                    sina_map = {item.get("name"): item for item in sina_result}
-                    result = [
-                        sina_map.get(item.get("name"), item)
-                        if item.get("price") in ("", "-", None) else item
-                        for item in result
-                    ]
-            
-            # 如果东方财富也失败，尝试新浪财经作为备选
-            if not result:
-                result = self._get_market_index_sina()
-            
-            if result:
-                data = {
-                    "success": True,
-                    "data": result,
-                    "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                self._set_cache(cache_key, data, 'market_index')
-                return data
-            
-            return {"success": False, "error": "获取指数数据失败", "data": []}
-        
-        except Exception as e:
-            stale = self._get_stale_cache(cache_key)
-            if stale and stale.get("data"):
-                stale = {**stale, "source": "stale_cache"}
-                return stale
-            result = result or self._get_market_index_sina()
+            result = self._get_market_index_sina()
             if result:
                 data = {
                     "success": True,
                     "data": result,
                     "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "source": "fallback"
+                    "source": "sina"
                 }
                 self._set_cache(cache_key, data, 'market_index')
                 return data
+            return {"success": False, "error": "获取指数数据失败", "data": []}
+        except Exception as e:
+            stale = self._get_stale_cache(cache_key)
+            if stale and stale.get("data"):
+                stale = {**stale, "source": "stale_cache"}
+                return stale
             return {"success": False, "error": self._short_error(e), "data": []}
 
     def _get_market_index_sina(self) -> list:
         """新浪指数兜底；如果网络仍不可用，返回结构稳定的占位行情。"""
         code_map = [
+            # A股核心指数
             ("sh000001", "上证指数", "A股"),
             ("sz399001", "深证成指", "A股"),
             ("sz399006", "创业板指", "A股"),
             ("sz399005", "中小100", "A股"),
+            ("sh000300", "沪深300", "A股"),
+            ("sh000016", "上证50", "A股"),
+            ("sh000688", "科创50", "A股"),
+            # 港股
             ("hkHSI", "恒生指数", "港股"),
             ("hkHSCEI", "国企指数", "港股"),
             ("hkHSTECH", "恒生科技", "港股"),
+            # 美股
             ("gb_ixic", "纳斯达克", "美股"),
             ("gb_dji", "道琼斯", "美股"),
             ("gb_inx", "标普500", "美股"),
+            # 全球
             ("b_NKY", "日经225", "全球"),
             ("b_KS11", "韩国综合", "全球"),
             ("b_UKX", "英国富时100", "全球"),
@@ -878,8 +687,10 @@ class FundMasterService:
             }
             response = self.session.get(url, headers=headers, timeout=8, verify=False)
             response.raise_for_status()
+            response.encoding = 'gbk'  # Sina 返回 GBK 编码，必须显式设置
             text = response.text
             result = []
+            now = datetime.datetime.now()
             for code, fallback_name, market in code_map:
                 marker = f"var hq_str_{code}=\""
                 start = text.find(marker)
@@ -902,9 +713,38 @@ class FundMasterService:
                     price = self._safe_float(parts[6] if len(parts) > 6 else parts[3])
                     pct = self._safe_float(parts[8] if len(parts) > 8 else 0)
                 else:
+                    # b_* 全球指数 / gb_* 美股指数
                     name = fallback_name
-                    price = self._safe_float(parts[1] if len(parts) > 1 else 0)
-                    pct = self._safe_float(parts[2] if len(parts) > 2 else 0)
+                    # b_*: parts[1]=price, parts[2]=涨跌额, parts[3]=涨跌幅%
+                    # gb_*: parts[1]=price, parts[2]=涨跌幅%
+                    if code.startswith("b_"):
+                        price = self._safe_float(parts[1] if len(parts) > 1 else 0)
+                        pct = self._safe_float(parts[3] if len(parts) > 3 else 0)
+                    else:
+                        price = self._safe_float(parts[1] if len(parts) > 1 else 0)
+                        pct = self._safe_float(parts[2] if len(parts) > 2 else 0)
+
+                    # 检测数据新鲜度
+                    data_date_str = ""
+                    if code.startswith("b_") and len(parts) > 6:
+                        # b_*: parts[6] = YYYY-MM-DD
+                        data_date_str = parts[6].strip()[:10]
+                    elif code.startswith("gb_") and len(parts) > 3:
+                        # gb_*: parts[3] = YYYY-MM-DD HH:MM:SS
+                        data_date_str = parts[3].strip()[:10]
+
+                    if data_date_str:
+                        try:
+                            data_date = datetime.datetime.strptime(data_date_str, "%Y-%m-%d")
+                            days_old = (now - data_date).days
+                            if days_old > 2:
+                                # 数据过期，价格和涨幅都不可靠
+                                price = 0.0
+                                pct = 0.0
+                                logger.info(f"[Sina] {fallback_name} 数据日期 {data_date_str} "
+                                            f"({days_old}天前)，已置为无效")
+                        except ValueError:
+                            pass
 
                 result.append({
                     "name": name,
@@ -923,11 +763,15 @@ class FundMasterService:
             {"name": "深证成指", "price": "-", "change_pct": "0.00%", "market": "A股", "raw_change": 0.0},
             {"name": "创业板指", "price": "-", "change_pct": "0.00%", "market": "A股", "raw_change": 0.0},
             {"name": "中小100", "price": "-", "change_pct": "0.00%", "market": "A股", "raw_change": 0.0},
+            {"name": "沪深300", "price": "-", "change_pct": "0.00%", "market": "A股", "raw_change": 0.0},
+            {"name": "上证50", "price": "-", "change_pct": "0.00%", "market": "A股", "raw_change": 0.0},
+            {"name": "科创50", "price": "-", "change_pct": "0.00%", "market": "A股", "raw_change": 0.0},
             {"name": "恒生指数", "price": "-", "change_pct": "0.00%", "market": "港股", "raw_change": 0.0},
             {"name": "国企指数", "price": "-", "change_pct": "0.00%", "market": "港股", "raw_change": 0.0},
-            {"name": "纳斯达克100", "price": "-", "change_pct": "0.00%", "market": "全球", "raw_change": 0.0},
-            {"name": "道琼斯", "price": "-", "change_pct": "0.00%", "market": "全球", "raw_change": 0.0},
-            {"name": "标普500", "price": "-", "change_pct": "0.00%", "market": "全球", "raw_change": 0.0},
+            {"name": "恒生科技", "price": "-", "change_pct": "0.00%", "market": "港股", "raw_change": 0.0},
+            {"name": "纳斯达克", "price": "-", "change_pct": "0.00%", "market": "美股", "raw_change": 0.0},
+            {"name": "道琼斯", "price": "-", "change_pct": "0.00%", "market": "美股", "raw_change": 0.0},
+            {"name": "标普500", "price": "-", "change_pct": "0.00%", "market": "美股", "raw_change": 0.0},
             {"name": "日经225", "price": "-", "change_pct": "0.00%", "market": "全球", "raw_change": 0.0},
             {"name": "韩国综合", "price": "-", "change_pct": "0.00%", "market": "全球", "raw_change": 0.0},
             {"name": "英国富时100", "price": "-", "change_pct": "0.00%", "market": "全球", "raw_change": 0.0},
@@ -1269,7 +1113,7 @@ class FundMasterService:
         return {"success": False, "error": "获取上证指数数据失败", "data": []}
     
     def _get_sector_rank_via_service(self, limit: int = 500) -> dict:
-        """通过新 MarketDataService 获取板块（兼容旧调用方）"""
+        """通过 MarketDataService 获取板块（同花顺源），失败时降级到 FundMasterService"""
         try:
             from services.market_data import get_market_data_service as get_mds
             return get_mds().get_industry_boards(page_size=limit)
@@ -1280,18 +1124,41 @@ class FundMasterService:
     def get_market_overview(self) -> dict:
         """
         获取市场概览（汇总所有关键数据）
-        
+        并行调用各子接口，减少串行等待时间
+
         Returns:
             dict: 包含所有市场数据的汇总
         """
+        update_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 并行获取各子数据
+        results = {}
+        tasks = {
+            "market_index": self.get_market_index,
+            "gold_realtime": self.get_gold_realtime,
+            "sector_rank": lambda: self._get_sector_rank_via_service(limit=500),
+            "a_volume_7days": self.get_a_volume_7days,
+            "sse_30min": self.get_sse_30min,
+        }
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(fn): key for key, fn in tasks.items()}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    results[key] = future.result(timeout=30)
+                except Exception as e:
+                    logger.warning(f"[MarketOverview] 获取 {key} 失败: {e}")
+                    results[key] = {"success": False, "error": str(e), "data": []}
+
         return {
             "success": True,
-            "market_index": self.get_market_index(),
-            "gold_realtime": self.get_gold_realtime(),
-            "sector_rank": self._get_sector_rank_via_service(limit=500),
-            "a_volume_7days": self.get_a_volume_7days(),
-            "sse_30min": self.get_sse_30min(),
-            "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "market_index": results.get("market_index"),
+            "gold_realtime": results.get("gold_realtime"),
+            "sector_rank": results.get("sector_rank"),
+            "a_volume_7days": results.get("a_volume_7days"),
+            "sse_30min": results.get("sse_30min"),
+            "update_time": update_time
         }
 
 

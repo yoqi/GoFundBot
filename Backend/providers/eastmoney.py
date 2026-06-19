@@ -20,7 +20,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
-from core.request import get_json, get_text
+from core.request import get_json, get_text, DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES
 from symbols import to_board_secid, to_eastmoney_secid
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,8 @@ def get_industry_boards(
     sort_order: int = 1,
     fs_filter: str = "m:90 t:2 f:!50",
     fields: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> List[Dict[str, Any]]:
     """
     获取东方财富行业板块列表
@@ -85,7 +87,11 @@ def get_industry_boards(
     }
 
     url = f"https://17.push2.eastmoney.com/api/qt/clist/get?{urlencode(params, safe=':+,!')}"
-    payload = get_json(url, referer=EM_REFERER, impersonate="auto")
+    payload = get_json(
+        url, referer=EM_REFERER,
+        timeout=timeout, max_retries=max_retries,
+        impersonate="auto"
+    )
 
     data = payload.get("data") or {}
     diff = data.get("diff") or []

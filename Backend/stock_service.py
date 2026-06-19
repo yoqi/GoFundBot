@@ -1,3 +1,9 @@
+# DEPRECATED:
+# This module is kept as fallback during the DataService migration.
+# New external financial data access should be implemented in DataService providers.
+# Do not add new third-party data source calls here.
+# Target replacement: DataService stockService.reference / EastMoneyStockProvider.
+
 import requests
 import json
 import threading
@@ -166,8 +172,47 @@ class StockService:
         Convert internal code to full info {name, market}.
         """
         search_code = self.normalize_code(internal_code)
-        
+
         if search_code in self.stock_details:
             return self.stock_details[search_code]
-            
+
         return {'name': search_code, 'market': '--'}
+
+
+# ---------------------------------------------------------------------------
+# DataService-first stock reference adapter
+# ---------------------------------------------------------------------------
+
+def get_stock_info_ds_first(internal_code: str) -> dict:
+    """
+    Resolve stock reference info via DataService first, fallback to legacy StockService.
+
+    Returns: {'name': str, 'market': str, 'code': str}
+    """
+    service = StockService()
+    search_code = service.normalize_code(internal_code)
+
+    # 1) Try DataServiceClient
+    try:
+        from services.data_service_client import get_data_service_client
+        ds_payload = get_data_service_client().get_stock_reference(search_code)
+        ds_data = ds_payload.get('data', {}) if isinstance(ds_payload, dict) else {}
+
+        if ds_data and isinstance(ds_data, dict):
+            name = ds_data.get('name') or search_code
+            market = ds_data.get('market') or '--'
+            symbol = ds_data.get('symbol') or search_code
+            result = {
+                'name': str(name),
+                'market': str(market),
+                'code': str(symbol),
+            }
+            # Also update local cache so subsequent lookups are fast
+            if name and name != search_code:
+                service.stock_details[search_code] = {'name': str(name), 'market': str(market)}
+            return result
+    except Exception as e:
+        print(f"stock_info_ds_first: DataService unavailable for {search_code}, fallback: {e}")
+
+    # 2) Fallback to legacy StockService
+    return service.get_stock_info(internal_code)

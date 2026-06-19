@@ -6,17 +6,20 @@
       <input
         v-model.trim="keyword"
         class="search-input header-search"
-        placeholder="搜索板块名称..."
+        placeholder="搜索板块名称或代码..."
       />
-      <button class="refresh-btn" @click="fetchSectors" :disabled="loading" title="刷新">
+      <button class="refresh-btn" @click="fetchSectors" :disabled="loading" title="刷新板块数据">
         <span :class="{ 'spinning': loading }">🔄</span>
       </button>
     </div>
     <div class="filter-panel">
       <div class="filter-row">
-        <select v-model="sortBy" class="sort-select" @change="sortData">
-          <option value="change">按涨跌幅</option>
-          <option value="inflow">按主力流入</option>
+        <select v-model="sortBy" class="sort-select">
+          <option value="change_desc">涨跌幅 ↓</option>
+          <option value="change_asc">涨跌幅 ↑</option>
+          <option value="inflow_desc">主力净流入 ↓</option>
+          <option value="inflow_asc">主力净流入 ↑</option>
+          <option value="name">按名称</option>
         </select>
         <select v-model="changeFilter" class="sort-select">
           <option value="all">全部涨跌</option>
@@ -31,7 +34,7 @@
         </select>
       </div>
       <div class="market-stats" v-if="sectors.length">
-        <span class="stat-chip total">{{ isPartial ? '缓存' : '全市场' }} {{ sectors.length }}</span>
+        <span class="stat-chip total">{{ isFromCache ? '缓存数据' : '实时数据' }} {{ sectors.length }}</span>
         <span class="stat-chip up">上涨 {{ upCount }}</span>
         <span class="stat-chip flat">平盘 {{ flatCount }}</span>
         <span class="stat-chip down">下跌 {{ downCount }}</span>
@@ -79,7 +82,6 @@
             <div class="sector-flow">
               <span class="label">主力:</span>
               <span :class="getFlowClass(sector.main_inflow)">{{ sector.main_inflow }}</span>
-              <span class="pct">({{ sector.main_inflow_pct }})</span>
             </div>
           </div>
           <div class="sector-change" :class="{ 'up': sector.raw_change > 0, 'down': sector.raw_change < 0 }">
@@ -95,15 +97,17 @@
         <button class="page-btn" @click="currentPage -= 1" :disabled="currentPage === 1">上一页</button>
         <span class="page-info">第 {{ currentPage }} / {{ totalPages }} 页</span>
         <button class="page-btn" @click="currentPage += 1" :disabled="currentPage === totalPages">下一页</button>
-        <button class="page-btn" @click="currentPage = totalPages" :disabled="currentPage === totalPages">末页</button>
       </div>
     </div>
     
     <div v-if="updateTime" class="update-time">
-      <span v-if="dataDate" class="data-date">
-        {{ isStale ? '上个交易日数据' : '数据日期' }} {{ dataDate }}
+      <span v-if="isFromCache" class="data-source-badge stale" title="数据来自本地缓存，非实时行情">
+        📦 本地缓存
       </span>
-      <span>更新于{{ updateTime }}</span>
+      <span v-if="dataDate" class="data-date" title="数据对应的交易日">
+        {{ isStale ? '📅' : '' }} {{ dataDate }}
+      </span>
+      <span class="last-refresh">上次刷新 {{ updateTime.slice(-8) }}</span>
     </div>
   </div>
 </template>
@@ -136,8 +140,9 @@ export default {
     const dataDate = ref('')
     const isStale = ref(false)
     const isPartial = ref(false)
-    const sortBy = ref('change')
+    const dataSource = ref('')
     const keyword = ref('')
+    const sortBy = ref('change_desc')
     const changeFilter = ref('all')
     const flowFilter = ref('all')
     const pageSize = 20
@@ -190,21 +195,18 @@ export default {
       dataDate.value = meta.data_date || ''
       isStale.value = !!meta.is_stale
       isPartial.value = !!meta.is_partial
-      sortData()
+      dataSource.value = meta.source || ''
       currentPage.value = 1
     }
 
-    const sortData = () => {
-      if (sortBy.value === 'change') {
-        sectors.value.sort((a, b) => b.raw_change - a.raw_change)
-      } else {
-        sectors.value.sort((a, b) => b.raw_main_inflow - a.raw_main_inflow)
-      }
-    }
+    const isFromCache = computed(() => {
+      return dataSource.value === 'file_cache' || dataSource.value === 'stale_cache'
+    })
     
     const filteredSectors = computed(() => {
       const q = keyword.value.trim().toLowerCase()
-      return sectors.value.filter(sector => {
+      // 1) 筛选
+      let result = sectors.value.filter(sector => {
         if (q && !String(sector.name || '').toLowerCase().includes(q)) return false
         if (changeFilter.value === 'up' && !(sector.raw_change > 0)) return false
         if (changeFilter.value === 'down' && !(sector.raw_change < 0)) return false
@@ -213,6 +215,16 @@ export default {
         if (flowFilter.value === 'outflow' && !(sector.raw_main_inflow < 0)) return false
         return true
       })
+      // 2) 排序
+      const sortFn = {
+        change_desc: (a, b) => b.raw_change - a.raw_change,
+        change_asc:  (a, b) => a.raw_change - b.raw_change,
+        inflow_desc: (a, b) => b.raw_main_inflow - a.raw_main_inflow,
+        inflow_asc:  (a, b) => a.raw_main_inflow - b.raw_main_inflow,
+        name: (a, b) => String(a.name).localeCompare(String(b.name), 'zh'),
+      }
+      const fn = sortFn[sortBy.value] || sortFn.change_desc
+      return result.sort(fn)
     })
 
     const totalPages = computed(() => Math.max(1, Math.ceil(filteredSectors.value.length / pageSize)))
@@ -237,7 +249,7 @@ export default {
       return 'inflow'
     }
 
-    watch([keyword, changeFilter, flowFilter], () => {
+    watch([keyword, sortBy, changeFilter, flowFilter], () => {
       currentPage.value = 1
     })
 
@@ -266,8 +278,9 @@ export default {
       dataDate,
       isStale,
       isPartial,
-      sortBy,
+      isFromCache,
       keyword,
+      sortBy,
       changeFilter,
       flowFilter,
       pageSize,
@@ -283,7 +296,6 @@ export default {
       downPercent,
       flatPercent,
       fetchSectors,
-      sortData,
       getFlowClass
     }
   }
@@ -324,8 +336,7 @@ export default {
 }
 
 .filter-row {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
   gap: 8px;
   align-items: center;
 }
@@ -406,21 +417,32 @@ export default {
 
 .header-search {
   flex: 1;
-  max-width: 260px;
+  max-width: 400px;
 }
 
 .refresh-btn {
-  background: transparent;
-  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  background: var(--item-bg, #f5f5f5);
+  border: 1px solid var(--border-color, #ddd);
   cursor: pointer;
   font-size: 16px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  transition: background 0.2s;
+  border-radius: 8px;
+  transition: all 0.2s;
+  flex-shrink: 0;
 }
 
 .refresh-btn:hover {
-  background: var(--hover-bg, #f5f5f5);
+  background: #e8e8e8;
+  border-color: #bbb;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .spinning {
@@ -672,11 +694,29 @@ export default {
   color: var(--text-tertiary, #bbb);
 }
 
+.data-source-badge {
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 11px;
+  background: #fef3c7;
+  color: #d97706;
+}
+
+.data-source-badge.stale {
+  background: #e0e7ff;
+  color: #4f46e5;
+}
+
 .data-date {
   color: #8b5cf6;
   background: #f3efff;
   padding: 1px 6px;
   border-radius: 4px;
+}
+
+.last-refresh {
+  color: var(--text-tertiary, #bbb);
 }
 
 @media (max-width: 1280px) {
@@ -685,7 +725,7 @@ export default {
   }
 
   .filter-row {
-    grid-template-columns: 1fr;
+    flex-direction: column;
   }
 }
 
@@ -699,7 +739,7 @@ export default {
   }
 
   .filter-row {
-    grid-template-columns: 1fr;
+    flex-direction: column;
   }
 }
 </style>

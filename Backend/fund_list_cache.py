@@ -1,3 +1,9 @@
+# DEPRECATED:
+# This module is kept as fallback during the DataService migration.
+# New external financial data access should be implemented in DataService providers.
+# Do not add new third-party data source calls here.
+# Target replacement: DataService fundService.search / EastMoneyFundProvider.search.
+
 """
 基金列表本地缓存服务
 从天天基金获取全部基金列表并存储到本地，支持快速本地搜索

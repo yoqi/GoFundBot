@@ -23,14 +23,27 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 尝试导入 akshare
-try:
-    import akshare as ak
-    import pandas as pd
-    AKSHARE_AVAILABLE = True
-except ImportError:
-    AKSHARE_AVAILABLE = False
-    logger.warning("akshare 未安装，部分功能将不可用。请运行: pip install akshare")
+# 尝试导入 akshare（惰性，避免 py_mini_racer 在启动时崩溃）
+AKSHARE_AVAILABLE = False
+
+
+def _ensure_akshare():
+    global AKSHARE_AVAILABLE, ak, pd
+    import os as _os, sys as _sys
+    if os.environ.get('DISABLE_AKSHARE_FALLBACK') == '1':
+        return False
+    if AKSHARE_AVAILABLE:
+        return True
+    try:
+        import akshare as _ak
+        import pandas as _pd
+        globals()['ak'] = _ak
+        globals()['pd'] = _pd
+        AKSHARE_AVAILABLE = True
+        return True
+    except ImportError:
+        logger.warning("akshare 未安装，部分功能将不可用。请运行: pip install akshare")
+        return False
 
 try:
     import efinance as ef
@@ -214,6 +227,7 @@ class MarketDataService:
             logger.debug("[市场数据] 使用缓存的指数行情数据")
             return cached
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             logger.warning("[市场数据] akshare 不可用，返回空数据")
             return self._get_fallback_indices()
@@ -335,6 +349,7 @@ class MarketDataService:
             'status': 'unknown'
         }
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             return result
         
@@ -404,6 +419,7 @@ class MarketDataService:
             'update_time': datetime.now().strftime('%H:%M:%S')
         }
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             return result
         
@@ -459,6 +475,7 @@ class MarketDataService:
             'update_time': datetime.now().strftime('%H:%M:%S')
         }
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             return result
         
@@ -512,6 +529,7 @@ class MarketDataService:
         
         sectors = []
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             return sectors
         
@@ -613,6 +631,7 @@ class MarketDataService:
         
         stocks = []
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             return stocks
         
@@ -662,6 +681,7 @@ class MarketDataService:
         
         sectors = []
         
+        _ensure_akshare()
         if not AKSHARE_AVAILABLE:
             return sectors
         

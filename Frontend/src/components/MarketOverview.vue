@@ -67,22 +67,28 @@
       </div>
     </div>
     
-    <!-- 4. 实时贵金属 -->
+    <!-- 4. 实时贵金属 (点击查看历史走势) -->
     <div class="market-section">
       <div class="section-header">
         <h3>🥇 实时贵金属</h3>
       </div>
       <div class="gold-grid" v-if="goldRealtime.length">
-        <div 
-          v-for="item in goldRealtime" 
-          :key="item.name" 
+        <div
+          v-for="item in goldRealtime"
+          :key="item.name"
           class="gold-card"
-          :class="{ 
+          :class="{
             'up': item.change >= 0,
-            'down': item.change < 0
+            'down': item.change < 0,
+            'clickable': isGoldItem(item)
           }"
+          @click="isGoldItem(item) && openGoldHistory(item)"
+          :title="isGoldItem(item) ? '点击查看历史走势' : ''"
         >
-          <div class="gold-name">{{ item.name }}</div>
+          <div class="gold-name">
+            {{ item.name }}
+            <span v-if="isGoldItem(item)" class="chart-hint">📈</span>
+          </div>
           <div class="gold-price">{{ item.price }} <span class="unit">{{ item.unit }}</span></div>
           <div class="gold-change">
             <span>{{ item.change >= 0 ? '+' : '' }}{{ item.change }}</span>
@@ -91,38 +97,29 @@
         </div>
       </div>
     </div>
-    
-    <!-- 5. 黄金历史价格 (保持折叠功能) -->
-    <div class="market-section" v-if="showGoldHistory">
-      <div class="section-header">
-        <h3>📜 黄金历史价格</h3>
-        <button class="toggle-btn" @click="goldHistoryExpanded = !goldHistoryExpanded">
-          {{ goldHistoryExpanded ? '收起' : '展开' }}
-        </button>
+
+    <!-- 黄金历史走势弹窗 -->
+    <Teleport to="body">
+      <div v-if="goldModal.visible" class="gold-modal-overlay" @click.self="closeGoldHistory">
+        <div class="gold-modal">
+          <div class="gold-modal-header">
+            <h3>📈 {{ goldModal.name }} — 近{{ goldDays }}日走势</h3>
+            <div class="gold-modal-controls">
+              <select v-model="goldDays" class="days-select" @change="fetchGoldHistoryForModal">
+                <option :value="7">7天</option>
+                <option :value="10">10天</option>
+                <option :value="30">30天</option>
+              </select>
+              <button class="modal-close-btn" @click="closeGoldHistory">✕</button>
+            </div>
+          </div>
+          <div class="gold-modal-body">
+            <v-chart v-if="goldChartOption" class="gold-chart" :option="goldChartOption" autoresize />
+            <div v-else class="empty-state">暂无历史数据</div>
+          </div>
+        </div>
       </div>
-      <div v-if="goldHistoryExpanded && goldHistory.length" class="history-table">
-        <table>
-          <thead>
-            <tr>
-              <th>日期</th>
-              <th>中国黄金</th>
-              <th>涨跌</th>
-              <th>周大福</th>
-              <th>涨跌</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in goldHistory" :key="item.date">
-              <td>{{ formatDate(item.date) }}</td>
-              <td>{{ item.china_gold_price }}</td>
-              <td :class="getChangeClass(item.china_gold_change)">{{ item.china_gold_change }}</td>
-              <td>{{ item.zhoudafu_price }}</td>
-              <td :class="getChangeClass(item.zhoudafu_change)">{{ item.zhoudafu_change }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -153,8 +150,101 @@ export default {
     const goldHistory = ref([])
     const aVolume = ref([])
     const updateTime = ref('')
-    const goldHistoryExpanded = ref(true)
     let refreshTimer = null
+
+    // ── 黄金弹窗 ──
+    const goldModal = ref({ visible: false, name: '', code: '' })
+    const goldDays = ref(10)
+    const goldModalHistory = ref([])
+
+    const goldChartOption = computed(() => {
+      const data = goldModalHistory.value
+      if (!data.length) return null
+
+      const dates = data.map(i => i.date.slice(5)) // MM-DD
+      const chinaGold = data.map(i => parseFloat(i.china_gold_price) || null)
+      const zhoudafu = data.map(i => parseFloat(i.zhoudafu_price) || null)
+
+      return {
+        grid: { top: 20, right: 20, bottom: 30, left: 55, containLabel: false },
+        tooltip: {
+          trigger: 'axis',
+          formatter: (params) => {
+            const idx = params[0]?.dataIndex
+            if (idx == null) return ''
+            const d = data[idx]
+            return `<b>${d.date}</b><br/>
+              中国黄金: ${d.china_gold_price} (${d.china_gold_change})<br/>
+              周大福: ${d.zhoudafu_price} (${d.zhoudafu_change})`
+          }
+        },
+        legend: {
+          data: ['中国黄金', '周大福'],
+          bottom: 0,
+          textStyle: { fontSize: 12 }
+        },
+        xAxis: {
+          type: 'category',
+          data: dates,
+          axisLabel: { color: '#999', fontSize: 10 },
+          axisTick: { show: false }
+        },
+        yAxis: {
+          type: 'value',
+          scale: true,
+          splitLine: { lineStyle: { type: 'dashed', color: '#f0f0f0' } },
+          axisLabel: { color: '#999', fontSize: 10 }
+        },
+        series: [
+          {
+            name: '中国黄金',
+            data: chinaGold,
+            type: 'line',
+            smooth: true,
+            symbol: 'circle',
+            symbolSize: 4,
+            lineStyle: { width: 2, color: '#fa8c16' },
+            itemStyle: { color: '#fa8c16' }
+          },
+          {
+            name: '周大福',
+            data: zhoudafu,
+            type: 'line',
+            smooth: true,
+            symbol: 'circle',
+            symbolSize: 4,
+            lineStyle: { width: 2, color: '#1677ff' },
+            itemStyle: { color: '#1677ff' }
+          }
+        ]
+      }
+    })
+
+    const openGoldHistory = async (item) => {
+      goldModal.value = { visible: true, name: item.name, code: item.code || '' }
+      document.body.style.overflow = 'hidden'
+      await fetchGoldHistoryForModal()
+    }
+
+    const closeGoldHistory = () => {
+      goldModal.value = { visible: false, name: '', code: '' }
+      document.body.style.overflow = ''
+    }
+
+    const isGoldItem = (item) => {
+      return item.name && (item.name.includes('黄金') || item.name.includes('金'))
+    }
+
+    const fetchGoldHistoryForModal = async () => {
+      try {
+        const res = await marketAPI.getGoldHistory(goldDays.value)
+        if (res.data.success) {
+          goldModalHistory.value = res.data.data
+        }
+      } catch (e) {
+        console.error('获取黄金历史失败:', e)
+      }
+    }
     
     // 指数分时数据
     const indicesIntraday = ref({ sh: [], sz: [], hs300: [] })
@@ -317,10 +407,6 @@ export default {
             indicesIntraday.value = intradayRes.data.data
         }
         
-        if (props.showGoldHistory) {
-          const historyRes = await marketAPI.getGoldHistory(10)
-          if (historyRes.data.success) goldHistory.value = historyRes.data.data
-        }
       } catch (e) {
         console.error(e)
       } finally {
@@ -360,11 +446,11 @@ export default {
     return {
       loading, fetchAll,
       marketIndex, indices,
-      goldRealtime, goldHistory, goldHistoryExpanded,
-      aVolume, updateTime, 
+      goldRealtime, goldModal, goldDays, goldModalHistory, goldChartOption,
+      openGoldHistory, closeGoldHistory, isGoldItem, fetchGoldHistoryForModal,
+      aVolume, updateTime,
       formatDate, getChangeClass, getUpDnClass,
       volumeOption,
-      // New returns
       tabs, activeTab, activeTabName, hasCurrentData, currentChartOption
     }
   }
@@ -522,26 +608,51 @@ export default {
 .gold-card.down .pct { background: #e6fffb; color: #13c2c2; } /* Try teal for down or green */
 .gold-card.down .pct { background: #f6ffed; color: #52c41a; }
 
-/* 历史表格 */
-.history-table {
-  overflow-x: auto;
+/* ── 黄金弹窗 ── */
+.gold-modal-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.gold-modal {
+  background: #fff; border-radius: 16px;
+  width: 100%; max-width: 680px; max-height: 80vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+  animation: slideUp 0.25s ease;
+}
+@keyframes slideUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+
+.gold-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid #f0f0f0;
+}
+.gold-modal-header h3 { margin: 0; font-size: 16px; color: #1a1a1a; }
+
+.gold-modal-controls { display: flex; align-items: center; gap: 10px; }
+
+.days-select {
+  padding: 4px 10px; border: 1px solid #ddd; border-radius: 6px;
+  font-size: 12px; background: #fafafa; color: #666; cursor: pointer;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9em;
+.modal-close-btn {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 8px; background: #f5f5f5;
+  font-size: 16px; color: #595959; cursor: pointer; transition: all 0.15s;
 }
+.modal-close-btn:hover { background: #e8e8e8; color: #1a1a1a; }
 
-th, td {
-  padding: 8px;
-  text-align: right;
-  border-bottom: 1px solid #f0f0f0;
-}
-th:first-child, td:first-child { text-align: left; }
-th { color: #999; font-weight: normal; }
-td.up { color: #f5222d; }
-td.down { color: #52c41a; }
+.gold-modal-body { padding: 20px; flex: 1; min-height: 320px; }
+.gold-chart { width: 100%; height: 380px; }
+
+.gold-card.clickable { cursor: pointer; }
+.gold-card.clickable:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(250,140,22,0.2); }
 
 .refresh-btn, .toggle-btn {
   background: none;

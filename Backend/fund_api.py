@@ -1,9 +1,15 @@
+# DEPRECATED:
+# This module is kept as fallback during the DataService migration.
+# New external financial data access should be implemented in DataService providers.
+# Do not add new third-party data source calls here.
+# Target replacement: DataService fundService (basic / nav / rank / holdings / managers / performance / detail).
+
 import requests
 import json
 import re
 from datetime import datetime
 from typing import Dict, List, Any, Union
-from stock_service import StockService
+from stock_service import StockService, get_stock_info_ds_first
 
 # --- 数据清洗器 (原 api_handler.py) ---
 
@@ -182,7 +188,7 @@ class FundDataCleaner:
         if stock_codes_raw:
             for code in stock_codes_raw:
                 try:
-                    stock_info = self.stock_service.get_stock_info(code)
+                    stock_info = get_stock_info_ds_first(code)  # DataService-first adapter
                     display_code = self.stock_service.normalize_code(code)
 
                     enriched_stocks.append({
@@ -299,23 +305,45 @@ class FundDataCleaner:
         if raw_data.get('fS_code') is not None:
             raw_data['fS_code'] = self.normalize_fund_code(raw_data.get('fS_code'))
 
+        # 先清洗净值走势（图表数据源，来自 pingzhongdata，通常比 fundgz 更新更快）
+        net_worth_trend = self.clean_array_data(
+            raw_data.get('Data_netWorthTrend'), 'net_worth'
+        )
+
+        # 从走势中提取最新净值作为兜底（fundgz CDN 可能延迟）
+        trend_latest_nav = None
+        trend_latest_date = None
+        if net_worth_trend:
+            last_point = net_worth_trend[-1]
+            trend_latest_nav = last_point.get('net_worth') if isinstance(last_point, dict) else None
+            trend_latest_date = last_point.get('date') if isinstance(last_point, dict) else None
+
+        # fundgz 提供的实时估值数据
+        fundgz_nav = raw_data.get('dwjz')
+        fundgz_date = raw_data.get('jzrq')
+
+        # 兜底逻辑：如果 fundgz 的净值日期比走势最新日期旧，用走势数据覆盖
+        net_worth = fundgz_nav
+        net_worth_date = fundgz_date
+        if trend_latest_nav is not None and trend_latest_date is not None:
+            if not fundgz_date or str(trend_latest_date) > str(fundgz_date):
+                net_worth = trend_latest_nav
+                net_worth_date = trend_latest_date
+
         cleaned_data = {
             'basic_info': self.clean_fund_info(raw_data),
             'performance': self.clean_performance_data(raw_data),
             'portfolio': self.clean_portfolio_data(raw_data),
-            # 实时估值数据（来自 fundgz 接口）
             'realtime_estimate': {
-                'name': raw_data.get('name'),           # 基金名称
-                'fund_code': raw_data.get('fundcode'),  # 基金代码
-                'net_worth': raw_data.get('dwjz'),      # 单位净值
-                'net_worth_date': raw_data.get('jzrq'), # 净值日期
-                'estimate_value': raw_data.get('gsz'),  # 估算净值
-                'estimate_change': raw_data.get('gszzl'), # 估算涨跌幅
-                'estimate_time': raw_data.get('gztime'),  # 估值时间
+                'name': raw_data.get('name'),
+                'fund_code': raw_data.get('fundcode'),
+                'net_worth': net_worth,
+                'net_worth_date': net_worth_date,
+                'estimate_value': raw_data.get('gsz'),
+                'estimate_change': raw_data.get('gszzl'),
+                'estimate_time': raw_data.get('gztime'),
             },
-            'net_worth_trend': self.clean_array_data(
-                raw_data.get('Data_netWorthTrend'), 'net_worth'
-            ),
+            'net_worth_trend': net_worth_trend,
             'accumulated_net_worth': self.clean_array_data(
                 raw_data.get('Data_ACWorthTrend'), 'position'
             ),
