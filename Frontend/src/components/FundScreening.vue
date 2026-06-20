@@ -2,273 +2,198 @@
   <div class="fund-screening">
     <!-- 顶部状态栏 -->
     <div class="screening-header">
-      <div class="header-title">
-        <h2>🔍 基金智能筛选</h2>
-        <p class="subtitle">多维度数据分析，科学筛选优质基金</p>
-      </div>
       <div class="header-actions">
-        <div class="db-status">
-          <span class="status-label">数据库状态:</span>
-          <span class="status-value" :class="{ 'has-data': dbStatus.basic_count > 0 }">
-            {{ dbStatus.basic_count > 0 ? `${dbStatus.basic_count}只基金` : '暂无数据' }}
+        <div class="header-left">
+          <span class="stat-chip">
+            📦 {{ dbStatus.basic_count || 0 }} 只基金
           </span>
-          <span v-if="dbStatus.latest_update" class="update-time">
-            更新于 {{ formatDate(dbStatus.latest_update) }}
+          <span class="stat-chip complete" v-if="dbStatus.risk_metrics_count">
+            ✅ {{ dbStatus.risk_metrics_count }} 只数据完整
+          </span>
+          <span class="update-time-chip" v-if="dbStatus.latest_update">
+            🕐 {{ formatDate(dbStatus.latest_update) }}
           </span>
         </div>
-        <button 
-          class="btn-update" 
-          @click="showUpdateModal = true"
-          :disabled="updateStatus.running"
+        <div class="header-right">
+          <button
+            class="btn-update"
+            @click="startUpdate"
+            :disabled="updateStatus.running || fillRiskRunning"
+            title="后台更新基金排行数据"
+          >
+            {{ updateStatus.running ? '⏳ 更新中...' : '📥 更新数据' }}
+          </button>
+          <button
+            class="btn-fill-risk"
+            @click="startFillRisk"
+            :disabled="updateStatus.running || fillRiskRunning"
+          title="为缺失的基金补充回撤/波动率/夏普/卡玛"
         >
-          <span v-if="updateStatus.running" class="loading-spinner"></span>
-          {{ updateStatus.running ? '更新中...' : '📥 更新数据' }}
+          {{ fillRiskRunning ? '⏳ 补充中...' : '🩺 补风险指标' }}
         </button>
+        </div>
       </div>
     </div>
 
-    <!-- 更新进度弹窗 -->
-    <div v-if="showUpdateModal" class="modal-overlay" @click.self="closeUpdateModal">
-      <div class="modal-content update-modal">
-        <div class="modal-header">
-          <h3>更新筛选数据库</h3>
-          <button class="btn-close" @click="closeUpdateModal">×</button>
-        </div>
-        <div class="modal-body">
-          <!-- 更新选项 -->
-          <div v-if="!updateStatus.running" class="update-options">
-            <div class="option-group">
-              <label>选择基金类型:</label>
-              <div class="checkbox-group">
-                <label v-for="type in fundTypeOptions" :key="type.value">
-                  <input type="checkbox" v-model="selectedFundTypes" :value="type.value">
-                  {{ type.label }}
-                </label>
-              </div>
-            </div>
-            
-            <div class="option-group">
-              <label>更新数量限制 (测试用):</label>
-              <input type="number" v-model.number="updateLimit" placeholder="不限制" min="1">
-            </div>
-            
-            <button class="btn-start-update" @click="startUpdate">
-              🚀 开始更新数据
-            </button>
-            
-            <div class="secondary-actions">
-              <button class="btn-recalculate" @click="recalculateRankings" :disabled="recalculating">
-                {{ recalculating ? '⏳ 计算中...' : '🔄 重新计算排名' }}
-              </button>
-            </div>
-            <p class="mode-desc">
-              <strong>更新数据</strong>：直接获取基金完整数据，包括业绩、风险指标、持仓等<br>
-              <strong>重新计算排名</strong>：在同类型基金中计算排名百分位和4433法则
-            </p>
-          </div>
-
-          <!-- 更新进度 -->
-          <div v-else class="update-progress">
-            <div class="progress-info">
-              <span class="current-fund">{{ updateStatus.current_fund || updateStatus.message || '准备中...' }}</span>
-              <span class="progress-text">
-                {{ updateStatus.progress || 0 }} / {{ updateStatus.total || '?' }} 只基金
-              </span>
-            </div>
-            <div class="progress-bar">
-              <div 
-                class="progress-fill" 
-                :style="{ width: progressPercent + '%' }"
-              ></div>
-            </div>
-            <p class="progress-message">{{ updateStatus.message }}</p>
-            <button class="btn-stop" @click="stopUpdate">停止更新</button>
-          </div>
-        </div>
+    <!-- 进行中的更新 — 内联进度条 -->
+    <div v-if="updateStatus.running" class="inline-update-bar">
+      <div class="inline-progress-info">
+        <span class="inline-current">{{ updateStatus.current_fund || updateStatus.message }}</span>
+        <span class="inline-count">
+          <template v-if="updateStatus.total">{{ updateStatus.progress }}/{{ updateStatus.total }}</template>
+          <template v-else>已处理 {{ updateStatus.success_count || 0 }}</template>
+        </span>
       </div>
+      <div class="progress-bar" :class="{ indeterminate: isProgressIndeterminate }">
+        <div
+          class="progress-fill"
+          :class="{ indeterminate: isProgressIndeterminate }"
+          :style="{ width: progressPercent + '%' }"
+        ></div>
+      </div>
+      <button class="btn-stop-inline" @click="stopUpdate">⏹ 停止</button>
     </div>
 
     <!-- 筛选面板 -->
     <div class="screening-panel">
-      <!-- 预设策略 -->
-      <div class="strategy-section">
-        <h3>📊 快速筛选策略</h3>
-        <div class="strategy-cards">
-          <div 
-            v-for="strategy in strategies" 
-            :key="strategy.id"
-            class="strategy-card"
-            :class="{ active: selectedStrategy === strategy.id }"
-            @click="selectStrategy(strategy.id)"
-          >
-            <div class="strategy-name">{{ strategy.name }}</div>
-            <div class="strategy-desc">{{ strategy.description }}</div>
-            <div class="strategy-tags">
-              <span v-for="tag in strategy.tags" :key="tag" class="tag">{{ tag }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 自定义筛选条件 -->
-      <div class="filter-section">
-        <div class="filter-header">
-          <h3>⚙️ 自定义筛选条件</h3>
-          <button class="btn-reset" @click="resetFilters">重置</button>
-        </div>
-        
-        <div class="filter-card">
-          <!-- 基金类型 - 多级分类选择 -->
-          <div class="filter-row type-row">
-            <div class="filter-label">
-              <span class="label-icon">📁</span>
-              <span>基金类型</span>
-              <span class="selected-count" v-if="filters.fund_types.length > 0">
-                (已选 {{ filters.fund_types.length }} 项)
-              </span>
-            </div>
-            <div class="type-categories">
-              <div 
-                v-for="category in fundTypeCategories" 
-                :key="category.name"
-                class="type-category"
-              >
-                <!-- 分类标题 -->
-                <div 
-                  class="category-header"
-                  @click="toggleCategory(category.name)"
+      <div class="filter-card">
+        <!-- 基础筛选栏 -->
+        <div class="filter-bar">
+          <div class="filter-bar-row">
+            <div class="search-wrap" ref="searchWrapRef">
+              <span class="input-icon">🔎</span>
+              <input
+                v-model="filters.keyword"
+                type="text"
+                placeholder="基金代码/名称"
+                class="filter-keyword"
+                @keyup.enter="search(true)"
+                @input="onKeywordInput"
+                @focus="onKeywordFocus"
+              />
+              <div class="search-dropdown" v-if="searchSuggestions.length && showSearchDropdown">
+                <div
+                  v-for="item in searchSuggestions"
+                  :key="item.CODE"
+                  class="search-dropdown-item"
+                  @click="selectSearchSuggestion(item)"
                 >
-                  <span class="category-toggle">
-                    {{ isCategoryExpanded(category.name) ? '▼' : '▶' }}
-                  </span>
-                  <span class="category-icon">{{ category.icon }}</span>
-                  <span class="category-name">{{ category.name }}</span>
-                  <span 
-                    class="category-checkbox"
-                    :class="{ 
-                      'checked': isCategoryAllSelected(category),
-                      'partial': isCategoryPartialSelected(category)
-                    }"
-                    @click.stop="selectCategory(category)"
-                    title="全选/取消该分类"
-                  >
-                    <template v-if="isCategoryAllSelected(category)">✓</template>
-                    <template v-else-if="isCategoryPartialSelected(category)">-</template>
-                  </span>
-                </div>
-                <!-- 分类下的类型标签 -->
-                <div 
-                  class="category-types" 
-                  v-show="isCategoryExpanded(category.name)"
-                >
-                  <span 
-                    v-for="type in category.types" 
-                    :key="type.value"
-                    class="type-tag"
-                    :class="{ active: filters.fund_types.includes(type.value) }"
-                    @click="toggleFundType(type.value)"
-                  >
-                    {{ type.label }}
-                  </span>
+                  <span class="sug-code">{{ item.CODE }}</span>
+                  <span class="sug-name">{{ item.NAME }}</span>
+                  <span class="sug-type">{{ item.TYPE }}</span>
                 </div>
               </div>
             </div>
+            <!-- 基金类型下拉 -->
+            <div class="type-select-wrap" ref="typeDropdownRef">
+              <span class="input-icon">📁</span>
+              <div class="type-trigger" @click="showTypeDropdown = !showTypeDropdown">
+                <span class="type-trigger-text">
+                  {{ filters.fund_types.length ? filters.fund_types.length + ' 种类型' : '基金类型' }}
+                </span>
+                <span class="type-trigger-arrow">▼</span>
+              </div>
+              <div class="type-dropdown" v-show="showTypeDropdown" @click.stop>
+                <div
+                  v-for="cat in fundTypeCategories"
+                  :key="cat.name"
+                  class="type-cat-group"
+                >
+                  <div
+                    class="type-cat-header"
+                    :class="{ all: isCatAllSelected(cat), partial: isCatPartialSelected(cat) }"
+                    @click="toggleCategoryTypes(cat)"
+                  >
+                    <span class="cat-check">
+                      {{ isCatAllSelected(cat) ? '✓' : isCatPartialSelected(cat) ? '−' : '' }}
+                    </span>
+                    <span>{{ cat.icon }} {{ cat.name }}</span>
+                  </div>
+                  <div class="type-cat-items">
+                    <label
+                      v-for="t in cat.types"
+                      :key="t.value"
+                      class="type-item-label"
+                      :class="{ active: filters.fund_types.includes(t.value) }"
+                    >
+                      <input
+                        type="checkbox"
+                        :value="t.value"
+                        :checked="filters.fund_types.includes(t.value)"
+                        @change="toggleSingleType(t.value)"
+                        class="type-checkbox"
+                      />
+                      {{ t.label }}
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button class="btn-query" @click="search(true)">🔍 查询</button>
+            <button class="btn-reset" @click="resetFilters">清空</button>
           </div>
 
-          <!-- 主要指标筛选 - 网格布局 -->
-          <div class="filter-grid">
+          <!-- 已选类型标签 -->
+          <div class="selected-types-tags" v-if="filters.fund_types.length">
+            <span
+              v-for="t in filters.fund_types"
+              :key="t"
+              class="type-tag-selected"
+              @click="removeFundType(t)"
+            >
+              {{ getShortTypeName(t) }} ✕
+            </span>
+          </div>
+        </div>
+
+        <!-- 高级筛选 (可折叠) -->
+        <div class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+          <span>⚙️ 高级筛选条件</span>
+          <span class="toggle-arrow">{{ showAdvanced ? '▲' : '▼' }}</span>
+        </div>
+        <div class="advanced-section" v-show="showAdvanced">
+          <div class="adv-grid-simple">
             <!-- 收益率 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">📈</span>
-                <span>近1年收益率</span>
-              </div>
-              <div class="range-input-group">
-                <input type="number" v-model.number="filters.return_1y_min" placeholder="最小">
-                <span class="range-sep">~</span>
-                <input type="number" v-model.number="filters.return_1y_max" placeholder="最大">
-                <span class="unit">%</span>
+            <div class="adv-item">
+              <label>📈 近1年收益率</label>
+              <div class="adv-range">
+                <input v-model.number="advFilters.return_1y_min" type="number" placeholder="最小值" step="any" class="adv-inp" />
+                <span class="adv-sep">~</span>
+                <input v-model.number="advFilters.return_1y_max" type="number" placeholder="最大值" step="any" class="adv-inp" />
+                <span class="adv-unit">%</span>
               </div>
             </div>
-
             <!-- 最大回撤 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">📉</span>
-                <span>最大回撤上限</span>
-              </div>
-              <div class="single-input-group">
-                <input type="number" v-model.number="filters.max_drawdown_max" placeholder="如: 20">
-                <span class="unit">%</span>
+            <div class="adv-item">
+              <label>📉 最大回撤 ≤</label>
+              <div class="adv-range">
+                <input v-model.number="advFilters.max_drawdown_max" type="number" placeholder="如 20" step="any" class="adv-inp" />
+                <span class="adv-unit">%</span>
               </div>
             </div>
-
             <!-- 夏普比率 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">⚖️</span>
-                <span>夏普比率下限</span>
-              </div>
-              <div class="single-input-group">
-                <input type="number" v-model.number="filters.sharpe_min" placeholder="如: 1" step="0.1">
+            <div class="adv-item">
+              <label>⚖️ 夏普比率 ≥</label>
+              <div class="adv-range">
+                <input v-model.number="advFilters.sharpe_min" type="number" placeholder="如 1.5" step="0.1" class="adv-inp" />
               </div>
             </div>
-
             <!-- 波动率 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">🌊</span>
-                <span>波动率上限</span>
-              </div>
-              <div class="single-input-group">
-                <input type="number" v-model.number="filters.volatility_max" placeholder="如: 20">
-                <span class="unit">%</span>
+            <div class="adv-item">
+              <label>🌊 年化波动率 ≤</label>
+              <div class="adv-range">
+                <input v-model.number="advFilters.volatility_max" type="number" placeholder="如 25" step="any" class="adv-inp" />
+                <span class="adv-unit">%</span>
               </div>
             </div>
-
             <!-- 卡玛比率 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">🎯</span>
-                <span>卡玛比率下限</span>
-              </div>
-              <div class="single-input-group">
-                <input type="number" v-model.number="filters.calmar_min" placeholder="如: 1" step="0.1">
-              </div>
-            </div>
-
-            <!-- 基金规模 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">💰</span>
-                <span>基金规模</span>
-              </div>
-              <div class="range-input-group">
-                <input type="number" v-model.number="filters.scale_min" placeholder="最小">
-                <span class="range-sep">~</span>
-                <input type="number" v-model.number="filters.scale_max" placeholder="最大">
-                <span class="unit">亿</span>
-              </div>
-            </div>
-
-            <!-- 机构持有 -->
-            <div class="filter-item">
-              <div class="filter-label">
-                <span class="label-icon">🏛️</span>
-                <span>机构持有比例</span>
-              </div>
-              <div class="single-input-group">
-                <input type="number" v-model.number="filters.institution_ratio_min" placeholder="如: 30">
-                <span class="unit">%以上</span>
+            <div class="adv-item">
+              <label>🎯 卡玛比率 ≥</label>
+              <div class="adv-range">
+                <input v-model.number="advFilters.calmar_min" type="number" placeholder="如 1" step="0.1" class="adv-inp" />
               </div>
             </div>
           </div>
-        </div>
-
-        <div class="filter-actions">
-          <button class="btn-search" @click="search(true)">
-            🔍 开始筛选
-          </button>
         </div>
       </div>
     </div>
@@ -317,14 +242,15 @@
                 class="dropdown-menu"
                 v-show="activeQuickDropdown === category.name"
               >
-                <div 
-                  v-for="type in getFilteredCategoryTypes(category)" 
-                  :key="type"
+                <div
+                  v-for="item in getFilteredCategoryTypes(category)"
+                  :key="item.value"
                   class="dropdown-item"
-                  :class="{ active: quickTypeFilter === type }"
-                  @click="setQuickTypeFilter(type)"
+                  :class="{ active: quickTypeFilter === item.value, unavailable: !item.available }"
+                  @click="item.available && setQuickTypeFilter(item.value)"
                 >
-                  {{ getShortTypeName(type) }}
+                  {{ item.label }}
+                  <span v-if="!item.available" class="unavailable-hint">暂无</span>
                 </div>
                 <div v-if="getFilteredCategoryTypes(category).length === 0" class="dropdown-empty">
                   暂无此类型基金
@@ -474,7 +400,7 @@
 
 <script>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { screeningAPI, watchlistAPI } from '../services/api'
+import { screeningAPI, watchlistAPI, fundAPI } from '../services/api'
 
 export default {
   name: 'FundScreening',
@@ -499,27 +425,129 @@ export default {
       message: ''
     })
     
-    const showUpdateModal = ref(false)
-    const selectedFundTypes = ref(['混合型-偏股', '混合型-灵活', '股票型'])
+    const selectedFundTypes = ref([])
     const updateLimit = ref(null)
-    const recalculating = ref(false)  // 重新计算排名状态
+    const updateMode = ref('sync_nav')
+    const preciseLimit = ref(500)
+    const fillRiskRunning = ref(false)
     
-    // 策略
-    const strategies = ref([])
-    const selectedStrategy = ref(null)
-    
-    // 筛选条件
-    const filters = reactive({
-      fund_types: [],
+    // 高级筛选 — 直观的数值范围
+    const showAdvanced = ref(false)
+    const showTypeDropdown = ref(false)
+    const typeDropdownRef = ref(null)
+    const searchWrapRef = ref(null)
+
+    // 搜索自动补全
+    const searchSuggestions = ref([])
+    const showSearchDropdown = ref(false)
+    let searchDebounce = null
+
+    const onKeywordInput = () => {
+      clearTimeout(searchDebounce)
+      const kw = filters.keyword.trim()
+      if (!kw || kw.length < 2) {
+        searchSuggestions.value = []
+        showSearchDropdown.value = false
+        return
+      }
+      searchDebounce = setTimeout(async () => {
+        try {
+          const res = await fundAPI.searchFunds(kw)
+          searchSuggestions.value = (res.data.data || []).slice(0, 10)
+          showSearchDropdown.value = searchSuggestions.value.length > 0
+        } catch (e) {
+          // ignore
+        }
+      }, 150)
+    }
+
+    const onKeywordFocus = () => {
+      if (searchSuggestions.value.length > 0) {
+        showSearchDropdown.value = true
+      }
+    }
+
+    const selectSearchSuggestion = (item) => {
+      filters.keyword = item.CODE
+      showSearchDropdown.value = false
+      search(true)
+    }
+
+    // 点击外部关闭搜索下拉
+    const handleSearchClickOutside = (e) => {
+      if (searchWrapRef.value && !searchWrapRef.value.contains(e.target)) {
+        showSearchDropdown.value = false
+      }
+    }
+    const advFilters = reactive({
       return_1y_min: null,
       return_1y_max: null,
       max_drawdown_max: null,
       sharpe_min: null,
       volatility_max: null,
       calmar_min: null,
-      scale_min: null,
-      scale_max: null,
-      institution_ratio_min: null
+    })
+
+    const onTypeSelectChange = () => {}  // deprecated, kept for compat
+
+    const removeFundType = (type) => {
+      const idx = filters.fund_types.indexOf(type)
+      if (idx > -1) filters.fund_types.splice(idx, 1)
+    }
+
+    // 类型下拉：切换单个类型
+    const toggleSingleType = (type) => {
+      const idx = filters.fund_types.indexOf(type)
+      if (idx > -1) {
+        filters.fund_types.splice(idx, 1)
+      } else {
+        filters.fund_types.push(type)
+      }
+    }
+
+    // 类型下拉：点击分类头全选/取消该分类所有子类型
+    const toggleCategoryTypes = (cat) => {
+      const typeVals = cat.types.map(t => t.value)
+      const allSelected = typeVals.every(v => filters.fund_types.includes(v))
+      if (allSelected) {
+        // 全部取消
+        for (const v of typeVals) {
+          const idx = filters.fund_types.indexOf(v)
+          if (idx > -1) filters.fund_types.splice(idx, 1)
+        }
+      } else {
+        // 全部选中
+        for (const v of typeVals) {
+          if (!filters.fund_types.includes(v)) {
+            filters.fund_types.push(v)
+          }
+        }
+      }
+    }
+
+    const isCatAllSelected = (cat) => cat.types.every(t => filters.fund_types.includes(t.value))
+    const isCatPartialSelected = (cat) => {
+      const s = cat.types.filter(t => filters.fund_types.includes(t.value)).length
+      return s > 0 && s < cat.types.length
+    }
+
+    // 点击外部关闭类型下拉
+    const handleTypeDropdownClick = (e) => {
+      if (typeDropdownRef.value && !typeDropdownRef.value.contains(e.target)) {
+        showTypeDropdown.value = false
+      }
+    }
+
+    // 筛选条件
+    const filters = reactive({
+      keyword: '',
+      fund_types: [],
+      return_1y_min: null,
+      return_1y_max: null,
+      max_drawdown_max: null,
+      sharpe_min: null,
+      volatility_max: null,
+      calmar_min: null
     })
     
     // 多级基金类型选项
@@ -564,56 +592,7 @@ export default {
     ]
     
     // 控制分类展开状态
-    const expandedCategories = ref(['偏股型'])
-    
-    // 切换分类展开/折叠
-    const toggleCategory = (categoryName) => {
-      const index = expandedCategories.value.indexOf(categoryName)
-      if (index > -1) {
-        expandedCategories.value.splice(index, 1)
-      } else {
-        expandedCategories.value.push(categoryName)
-      }
-    }
-    
-    // 检查分类是否展开
-    const isCategoryExpanded = (categoryName) => {
-      return expandedCategories.value.includes(categoryName)
-    }
-    
-    // 选择整个分类下的所有类型
-    const selectCategory = (category) => {
-      const categoryTypes = category.types.map(t => t.value)
-      const allSelected = categoryTypes.every(t => filters.fund_types.includes(t))
-      
-      if (allSelected) {
-        // 全部取消
-        categoryTypes.forEach(t => {
-          const idx = filters.fund_types.indexOf(t)
-          if (idx > -1) filters.fund_types.splice(idx, 1)
-        })
-      } else {
-        // 全部选中
-        categoryTypes.forEach(t => {
-          if (!filters.fund_types.includes(t)) {
-            filters.fund_types.push(t)
-          }
-        })
-      }
-    }
-    
-    // 检查分类是否全选
-    const isCategoryAllSelected = (category) => {
-      return category.types.every(t => filters.fund_types.includes(t))
-    }
-    
-    // 检查分类是否部分选中
-    const isCategoryPartialSelected = (category) => {
-      const selected = category.types.filter(t => filters.fund_types.includes(t))
-      return selected.length > 0 && selected.length < category.types.length
-    }
-    
-    // 兼容旧的 fundTypeOptions (用于更新弹窗)
+    // 兼容 fundTypeOptions (用于更新弹窗复选框)
     const fundTypeOptions = computed(() => {
       const allTypes = []
       fundTypeCategories.forEach(cat => {
@@ -689,9 +668,13 @@ export default {
       activeQuickDropdown.value = null
     }
     
-    // 获取分类下在可用类型中的类型
+    // 获取分类下的所有子类型（从模式生成，不依赖当前页结果）
     const getFilteredCategoryTypes = (category) => {
-      return availableTypes.value.filter(type => getTypeCategoryName(type) === category.name)
+      return (category.patterns || []).map(p => ({
+        value: p,
+        label: p,
+        available: availableTypes.value.some(t => t.includes(p))
+      }))
     }
     
     // 检查分类下是否有当前选中的类型
@@ -726,10 +709,16 @@ export default {
     const progressPercent = computed(() => {
       const status = updateStatus.value
       if (!status.total || status.total === 0) {
-        // 使用 success_count 作为进度指示
-        return status.success_count > 0 ? Math.min((status.success_count / 5000) * 100, 99) : 0
+        // total 未知时显示平滑增长（最多到 90%）
+        const sc = status.success_count || 0
+        if (sc > 0) return Math.min(10 + (sc / Math.max(sc + 100, 1)) * 80, 90)
+        return 2  // 微小进度表示已开始
       }
-      return Math.round((status.progress / status.total) * 100)
+      return Math.max(1, Math.round((status.progress / status.total) * 100))
+    })
+
+    const isProgressIndeterminate = computed(() => {
+      return !updateStatus.value.total || updateStatus.value.total === 0
     })
     
     // 状态轮询定时器
@@ -744,30 +733,33 @@ export default {
           updateStatus.value = res.data.update_status
         }
       } catch (err) {
+        updateStatus.value.running = false
         console.error('获取状态失败:', err)
-      }
-    }
-    
-    // 获取策略列表
-    const fetchStrategies = async () => {
-      try {
-        const res = await screeningAPI.getStrategies()
-        strategies.value = res.data.strategies || []
-      } catch (err) {
-        console.error('获取策略失败:', err)
       }
     }
     
     // 开始更新
     const startUpdate = async () => {
       try {
+        updateStatus.value = {
+          running: true,
+          progress: 0,
+          total: 0,
+          current_fund: '',
+          success_count: 0,
+          fail_count: 0,
+          message: '正在启动更新任务...'
+        }
         await screeningAPI.startUpdate({
           fund_types: selectedFundTypes.value,
-          limit: updateLimit.value || null
+          limit: updateLimit.value || null,
+          mode: updateMode.value,
+          precise_limit: updateMode.value === 'sync_only' ? null : (preciseLimit.value || 500)
         })
         // 开始轮询状态
         startStatusPoll()
       } catch (err) {
+        updateStatus.value.running = false
         if (err.response?.status === 409) {
           alert('更新任务已在进行中')
         } else {
@@ -777,6 +769,28 @@ export default {
       }
     }
     
+    // 补充风险指标
+    const startFillRisk = async () => {
+      if (updateStatus.value.running) {
+        // 已有任务在运行，直接开始轮询
+        startStatusPoll()
+        return
+      }
+      fillRiskRunning.value = true
+      try {
+        await screeningAPI.fillRiskMetrics()
+        startStatusPoll()
+      } catch (err) {
+        fillRiskRunning.value = false
+        if (err.response?.status === 409) {
+          // 后台已有任务，开始轮询即可
+          startStatusPoll()
+        } else {
+          console.error('启动补充失败:', err)
+        }
+      }
+    }
+
     // 停止更新
     const stopUpdate = async () => {
       try {
@@ -786,44 +800,32 @@ export default {
       }
     }
     
-    // 重新计算同类型排名
-    const recalculateRankings = async () => {
-      if (recalculating.value) return
-      
-      recalculating.value = true
+    // 开始轮询状态
+    // 快速获取更新进度（仅内存端点，极快，不会被DB写入阻塞）
+    const fetchProgress = async () => {
       try {
-        const response = await screeningAPI.recalculateRankings()
-        if (response.data.success) {
-          alert(`排名计算完成！\n\n各类型4433通过率:\n${
-            Object.entries(response.data.stats || {})
-              .map(([type, stat]) => `${type}: ${stat.pass_4433}/${stat.total} (${stat.pass_rate}%)`)
-              .join('\n')
-          }`)
-          // 刷新数据
-          await fetchDbStatus()
-          if (results.value.length > 0) {
-            await search()
-          }
-        } else {
-          alert('计算失败: ' + response.data.error)
+        const res = await screeningAPI.getProgress()
+        if (res.data) {
+          updateStatus.value = res.data
+        }
+        const d = res.data
+        // 只有确认任务真正结束才停止轮询（total>0且progress>=total 或 running=false且progress=0）
+        const looksComplete = d.total > 0 && d.progress >= d.total
+        if (!d.running && (looksComplete || d.total === 0)) {
+          stopStatusPoll()
+          fillRiskRunning.value = false
+          fetchDbStatus()
         }
       } catch (err) {
-        console.error('重新计算排名失败:', err)
-        alert('重新计算排名失败')
-      } finally {
-        recalculating.value = false
+        console.error('获取进度失败:', err)
       }
     }
-    
-    // 开始轮询状态
+
     const startStatusPoll = () => {
       if (statusPollTimer) return
-      statusPollTimer = setInterval(async () => {
-        await fetchDbStatus()
-        if (!updateStatus.value.running) {
-          stopStatusPoll()
-        }
-      }, 2000)
+      statusPollTimer = setInterval(() => {
+        fetchProgress()
+      }, 1500)
     }
     
     // 停止轮询
@@ -834,104 +836,60 @@ export default {
       }
     }
     
-    // 关闭更新弹窗
-    const closeUpdateModal = () => {
-      if (!updateStatus.value.running) {
-        showUpdateModal.value = false
+    // 将 advFilters 转为后端需要的扁平 filter 字段
+    const buildFilterParams = () => {
+      const params = {}
+      if (filters.keyword) params.keyword = filters.keyword
+      if (filters.fund_types.length) params.fund_types = [...filters.fund_types]
+      if (quickTypeFilter.value) params.quick_fund_type = quickTypeFilter.value
+      // 直接映射 advFilters → 后端字段
+      const map = {
+        return_1y_min: 'return_1y_min', return_1y_max: 'return_1y_max',
+        max_drawdown_max: 'max_drawdown_max', sharpe_min: 'sharpe_min',
+        volatility_max: 'volatility_max', calmar_min: 'calmar_min',
       }
-    }
-    
-    // 选择策略
-    const selectStrategy = async (strategyId) => {
-      if (selectedStrategy.value === strategyId) {
-        selectedStrategy.value = null
-      } else {
-        selectedStrategy.value = strategyId
-      }
-      quickTypeFilter.value = ''  // 重置快速类型筛选
-      availableTypes.value = []   // 重置可用类型
-      
-      // 先查询可用的基金类型
-      if (selectedStrategy.value) {
-        try {
-          const cleanFilters = {}
-          for (const [key, value] of Object.entries(filters)) {
-            if (value !== null && value !== '' && !(Array.isArray(value) && value.length === 0)) {
-              cleanFilters[key] = value
-            }
-          }
-          const res = await screeningAPI.getAvailableTypes({
-            strategy: selectedStrategy.value,
-            filters: cleanFilters
-          })
-          availableTypes.value = res.data.types || []
-        } catch (err) {
-          console.error('获取类型失败:', err)
+      for (const [k, v] of Object.entries(map)) {
+        if (advFilters[k] !== null && advFilters[k] !== '' && Number.isFinite(Number(advFilters[k]))) {
+          params[v] = Number(advFilters[k])
         }
       }
-      
-      search(true)  // 重置页码
+      return params
     }
-    
+
     // 重置筛选条件
     const resetFilters = () => {
+      filters.keyword = ''
       filters.fund_types = []
-      filters.return_1y_min = null
-      filters.return_1y_max = null
-      filters.max_drawdown_max = null
-      filters.sharpe_min = null
-      filters.volatility_max = null
-      filters.calmar_min = null
-      filters.scale_min = null
-      filters.scale_max = null
-      filters.institution_ratio_min = null
-      selectedStrategy.value = null
+      Object.keys(advFilters).forEach(k => advFilters[k] = null)
+      quickTypeFilter.value = ''
     }
-    
+
     // 搜索
     const search = async (resetPage = false) => {
       loading.value = true
       searched.value = true
-      
-      // 重置页码（新搜索时）
-      if (resetPage) {
-        currentPage.value = 1
-      }
-      
+
+      if (resetPage) currentPage.value = 1
+
       try {
-        // 清理空值
-        const cleanFilters = {}
-        for (const [key, value] of Object.entries(filters)) {
-          if (value !== null && value !== '' && !(Array.isArray(value) && value.length === 0)) {
-            cleanFilters[key] = value
-          }
-        }
-        
-        // 如果有快速类型筛选，添加到过滤条件
-        if (quickTypeFilter.value) {
-          cleanFilters.quick_fund_type = quickTypeFilter.value
-        }
-        
+        const cleanFilters = buildFilterParams()
+
         const res = await screeningAPI.query({
           filters: cleanFilters,
-          strategy: selectedStrategy.value,
           sort_by: sortBy.value,
           sort_order: sortOrder.value,
           page: currentPage.value,
           page_size: pageSize.value
         })
-        
+
         results.value = res.data.data || []
         totalCount.value = res.data.total || 0
-        
-        // 从返回数据中提取当前页的类型（用于显示有哪些类型）
-        // 注意：这只是当前页的类型，不是全部类型
+
         if (!quickTypeFilter.value) {
           const types = new Set()
           results.value.forEach(f => {
             if (f.fund_type) types.add(f.fund_type)
           })
-          // 保留已有类型，并添加新类型
           const existingTypes = new Set(availableTypes.value)
           types.forEach(t => existingTypes.add(t))
           availableTypes.value = Array.from(existingTypes).sort()
@@ -942,16 +900,6 @@ export default {
         totalCount.value = 0
       } finally {
         loading.value = false
-      }
-    }
-    
-    // 切换基金类型选择
-    const toggleFundType = (typeValue) => {
-      const index = filters.fund_types.indexOf(typeValue)
-      if (index > -1) {
-        filters.fund_types.splice(index, 1)
-      } else {
-        filters.fund_types.push(typeValue)
       }
     }
     
@@ -1075,37 +1023,41 @@ export default {
     
     // 生命周期
     onMounted(async () => {
-      await fetchDbStatus()
-      fetchStrategies()
-      
+      // 先用快速端点检查是否有运行中的任务
+      await fetchProgress()
+      // 再加载完整DB状态（显示基金数量等）
+      fetchDbStatus()
+
       // 如果正在更新，开始轮询
       if (updateStatus.value.running) {
+        fillRiskRunning.value = true
         startStatusPoll()
       }
 
       // 点击外部关闭下拉菜单
       document.addEventListener('click', closeQuickDropdown)
+      document.addEventListener('click', handleTypeDropdownClick)
+      document.addEventListener('click', handleSearchClickOutside)
     })
-    
+
     onUnmounted(() => {
       stopStatusPoll()
       document.removeEventListener('click', closeQuickDropdown)
+      document.removeEventListener('click', handleTypeDropdownClick)
+      document.removeEventListener('click', handleSearchClickOutside)
     })
     
     return {
       // 状态
       dbStatus,
       updateStatus,
-      showUpdateModal,
       selectedFundTypes,
       updateLimit,
-      recalculating,
-      strategies,
-      selectedStrategy,
+      updateMode,
+      preciseLimit,
+      fillRiskRunning,
       filters,
-      fundTypeOptions,
       fundTypeCategories,
-      expandedCategories,
       sortBy,
       sortOrder,
       currentPage,
@@ -1115,19 +1067,35 @@ export default {
       loading,
       searched,
       progressPercent,
+      isProgressIndeterminate,
       quickTypeFilter,
       availableTypes,
       activeQuickDropdown,
       quickTypeCategories,
       uncategorizedTypes,
-      
+      // 高级筛选
+      showAdvanced,
+      advFilters,
+      onTypeSelectChange,
+      searchSuggestions,
+      showSearchDropdown,
+      searchWrapRef,
+      onKeywordInput,
+      onKeywordFocus,
+      selectSearchSuggestion,
+      removeFundType,
+      showTypeDropdown,
+      typeDropdownRef,
+      toggleSingleType,
+      toggleCategoryTypes,
+      isCatAllSelected,
+      isCatPartialSelected,
+
       // 方法
       fetchDbStatus,
       startUpdate,
+      startFillRisk,
       stopUpdate,
-      recalculateRankings,
-      closeUpdateModal,
-      selectStrategy,
       resetFilters,
       search,
       changePage,
@@ -1142,15 +1110,8 @@ export default {
       getSharpeClass,
       getCalmarClass,
       getStyleClass,
-      toggleFundType,
       setQuickTypeFilter,
       getShortTypeName,
-      toggleCategory,
-      isCategoryExpanded,
-      selectCategory,
-      isCategoryAllSelected,
-      isCategoryPartialSelected,
-      openQuickDropdown,
       closeQuickDropdown,
       toggleQuickDropdown,
       getFilteredCategoryTypes,
@@ -1174,6 +1135,19 @@ export default {
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   overflow: hidden;
+  min-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+}
+
+.screening-panel {
+  padding: 16px 24px;
+}
+
+.screening-panel .filter-card {
+  padding: 0;
+  background: transparent;
+  border: none;
 }
 
 /* 顶部状态栏 */
@@ -1181,9 +1155,9 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 24px;
-  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
-  color: white;
+  padding: 14px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e8e8e8;
 }
 
 .header-title h2 {
@@ -1200,652 +1174,236 @@ export default {
 .header-actions {
   display: flex;
   align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.stat-chip {
+  background: #f0f5ff;
+  color: #1677ff;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.stat-chip.complete {
+  background: #f0fdf4;
+  color: #16a34a;
+}
+
+.update-time-chip {
+  color: #999;
+  font-size: 0.8rem;
+  margin-left: 4px;
+}
+
+/* 内联更新进度条 */
+.inline-update-bar {
+  background: #fff7e6;
+  border-bottom: 2px solid #fa8c16;
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
   gap: 16px;
 }
 
-.db-status {
+.inline-progress-info {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 0.9rem;
-  background: rgba(255, 255, 255, 0.15);
-  padding: 8px 12px;
-  border-radius: 8px;
-}
-
-.status-value {
-  font-weight: 600;
-}
-
-.status-value.has-data {
-  color: #a5f3a5;
-}
-
-.update-time {
-  opacity: 0.8;
-  font-size: 0.85rem;
-}
-
-.btn-update {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  background: white;
-  color: #1677ff;
-  border: none;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.btn-update:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-}
-
-.btn-update:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-
-/* 弹窗 */
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.modal-content {
-  background: white;
-  border-radius: 16px;
-  width: 90%;
-  max-width: 500px;
-  overflow: hidden;
-}
-
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px;
-  border-bottom: 1px solid #eee;
-}
-
-.modal-header h3 {
-  margin: 0;
-  font-size: 1.1rem;
-}
-
-.btn-close {
-  background: none;
-  border: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: #999;
-}
-
-.modal-body {
-  padding: 20px;
-}
-
-.update-options .option-group {
-  margin-bottom: 16px;
-}
-
-.update-options label {
-  display: block;
-  font-weight: 500;
-  margin-bottom: 8px;
-}
-
-.checkbox-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.checkbox-group label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-weight: normal;
-  padding: 6px 12px;
-  background: #f5f7fa;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.checkbox-group label:hover {
-  background: #e9ecef;
-}
-
-.update-options input[type="number"] {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  font-size: 14px;
-}
-
-/* 更新模式选择 */
-.update-mode-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.mode-tab {
-  flex: 1;
-  padding: 12px;
-  border: 2px solid #e9ecef;
-  border-radius: 8px;
-  background: white;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.2s;
-}
-
-.mode-tab:hover {
-  border-color: #1677ff;
-}
-
-.mode-tab.active {
-  border-color: #1677ff;
-  background: linear-gradient(135deg, rgba(22, 119, 255, 0.1) 0%, rgba(9, 88, 217, 0.1) 100%);
-  color: #1677ff;
-}
-
-.mode-desc {
-  font-size: 12px;
-  color: #666;
-  margin: 0 0 16px 0;
-  padding: 8px;
-  background: #f8f9fa;
-  border-radius: 6px;
-}
-
-.btn-start-update {
-  width: 100%;
-  padding: 14px;
-  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  margin-top: 8px;
-}
-
-.btn-start-update:hover {
-  opacity: 0.9;
-}
-
-.secondary-actions {
-  display: flex;
   gap: 10px;
-  margin-top: 12px;
-}
-
-.secondary-actions button {
   flex: 1;
+  min-width: 0;
 }
 
-.btn-supplement,
-.btn-recalculate {
-  padding: 10px;
-  background: #f3f4f6;
-  color: #374151;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
+.inline-current {
   font-size: 13px;
-  cursor: pointer;
-}
-
-.btn-supplement:hover:not(:disabled),
-.btn-recalculate:hover:not(:disabled) {
-  background: #e5e7eb;
-}
-
-.btn-supplement:disabled,
-.btn-recalculate:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.supplement-progress {
-  margin-top: 16px;
-  padding: 12px;
-  background: #f0f9ff;
-  border-radius: 8px;
-  border: 1px solid #bae6fd;
-}
-
-.supplement-progress h4 {
-  margin: 0 0 10px 0;
-  font-size: 14px;
-  color: #0369a1;
-}
-
-/* 进度 */
-.update-progress {
-  text-align: center;
-}
-
-.progress-mode {
-  font-size: 14px;
-  color: #1677ff;
+  color: #333;
   font-weight: 500;
-  margin-bottom: 12px;
-}
-
-.progress-info {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  font-size: 14px;
-}
-
-.current-fund {
-  color: #666;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 70%;
 }
 
-.progress-bar {
-  height: 12px;
-  background: #e9ecef;
-  border-radius: 6px;
-  overflow: hidden;
-  margin-bottom: 12px;
-}
-
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
-  transition: width 0.3s;
-}
-
-.progress-stats {
-  display: flex;
-  justify-content: center;
-  gap: 24px;
-  margin-bottom: 12px;
-}
-
-.progress-stats .success {
-  color: #10b981;
-}
-
-.progress-stats .fail {
-  color: #ef4444;
-}
-
-.progress-message {
-  color: #666;
-  font-size: 14px;
-  margin-bottom: 16px;
-}
-
-.btn-stop {
-  padding: 10px 24px;
-  background: #ef4444;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-/* 筛选面板 */
-.screening-panel {
-  padding: 20px 24px;
-  border-bottom: 1px solid #eee;
-}
-
-.strategy-section h3,
-.filter-section h3 {
-  margin: 0 0 16px 0;
-  font-size: 1rem;
-  color: #333;
-}
-
-.strategy-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-  margin-bottom: 24px;
-}
-
-.strategy-card {
-  padding: 16px;
-  border: 2px solid #e9ecef;
-  border-radius: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.strategy-card:hover {
-  border-color: #1677ff;
-  transform: translateY(-2px);
-}
-
-.strategy-card.active {
-  border-color: #1677ff;
-  background: linear-gradient(135deg, rgba(22, 119, 255, 0.1) 0%, rgba(9, 88, 217, 0.1) 100%);
-}
-
-.strategy-name {
-  font-weight: 600;
-  margin-bottom: 6px;
-}
-
-.strategy-desc {
-  font-size: 0.85rem;
-  color: #666;
-  margin-bottom: 8px;
-}
-
-.strategy-tags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.tag {
-  padding: 2px 8px;
-  background: #f0f0f0;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  color: #666;
-}
-
-/* 筛选条件 - 新设计 */
-.filter-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
-
-.btn-reset {
-  padding: 6px 16px;
-  background: white;
-  border: 1px solid #e5e7eb;
-  border-radius: 20px;
-  cursor: pointer;
-  font-size: 13px;
-  color: #6b7280;
-  transition: all 0.2s;
-}
-
-.btn-reset:hover {
-  background: #f9fafb;
-  border-color: #d1d5db;
-  color: #374151;
-}
-
-.filter-card {
-  background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 100%);
-  border-radius: 16px;
-  padding: 20px;
-  border: 1px solid #e2e8f0;
-}
-
-/* 基金类型标签选择 */
-.filter-row {
-  margin-bottom: 20px;
-}
-
-.filter-row .filter-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #374151;
-  margin-bottom: 12px;
-}
-
-.label-icon {
-  font-size: 16px;
-}
-
-.selected-count {
+.inline-count {
   font-size: 12px;
-  color: #1677ff;
-  font-weight: normal;
-  margin-left: 6px;
-}
-
-/* 多级类型分类容器 */
-.type-categories {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-}
-
-.type-category {
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  overflow: hidden;
-  background: white;
-}
-
-.category-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  background: #f9fafb;
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.2s;
-}
-
-.category-header:hover {
-  background: #f3f4f6;
-}
-
-.category-toggle {
-  font-size: 10px;
-  color: #9ca3af;
-  width: 12px;
-}
-
-.category-icon {
-  font-size: 14px;
-}
-
-.category-name {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 600;
-  color: #374151;
-}
-
-.category-checkbox {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #d1d5db;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: white;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.category-checkbox:hover {
-  border-color: #1677ff;
-}
-
-.category-checkbox.checked {
-  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
-  border-color: transparent;
-}
-
-.category-checkbox.partial {
-  background: #a5b4fc;
-  border-color: transparent;
-  color: white;
-}
-
-.category-types {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 12px 14px;
-  background: white;
-  border-top: 1px solid #f3f4f6;
-}
-
-/* 保留旧的type-tags样式用于更新弹窗 */
-.type-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.type-tag {
-  padding: 6px 14px;
-  background: white;
-  border: 1px solid #e5e7eb;
-  border-radius: 20px;
-  font-size: 13px;
-  color: #6b7280;
-  cursor: pointer;
-  transition: all 0.2s;
-  user-select: none;
-}
-
-.type-tag:hover {
-  border-color: #a5b4fc;
-  color: #4f46e5;
-  background: #eef2ff;
-}
-
-.type-tag.active {
-  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
-  border-color: transparent;
-  color: white;
-  font-weight: 500;
-  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.3);
-}
-
-/* 筛选指标网格 */
-.filter-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 16px;
-}
-
-.filter-item {
-  background: white;
-  border-radius: 12px;
-  padding: 14px 16px;
-  border: 1px solid #e5e7eb;
-  transition: all 0.2s;
-}
-
-.filter-item:hover {
-  border-color: #c7d2fe;
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.08);
-}
-
-.filter-item .filter-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  color: #4b5563;
-  margin-bottom: 10px;
-}
-
-.filter-item .label-icon {
-  font-size: 14px;
-}
-
-/* 输入框组 */
-.range-input-group,
-.single-input-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.range-input-group input,
-.single-input-group input {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  font-size: 14px;
-  background: #f9fafb;
-  transition: all 0.2s;
-}
-
-.range-input-group input:focus,
-.single-input-group input:focus {
-  outline: none;
-  border-color: #818cf8;
-  background: white;
-  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.1);
-}
-
-.range-sep {
-  color: #9ca3af;
-  font-size: 14px;
-}
-
-.unit {
-  color: #9ca3af;
-  font-size: 13px;
+  color: #999;
   white-space: nowrap;
 }
 
-.filter-actions {
-  text-align: center;
-  margin-top: 20px;
+.btn-stop-inline {
+  padding: 5px 14px;
+  background: #fff;
+  border: 1px solid #fa8c16;
+  border-radius: 6px;
+  color: #fa8c16;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 0.2s;
 }
 
-.btn-search {
-  padding: 12px 48px;
-  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
-  color: white;
+.btn-stop-inline:hover {
+  background: #fa8c16;
+  color: #fff;
+}
+
+/* 关键词搜索 */
+.search-row {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 4px;
+}
+
+.search-keyword-input {
+  flex: 1;
+  padding: 8px 14px;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.search-keyword-input:focus {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1);
+}
+
+.btn-search-inline {
+  padding: 8px 18px;
+  background: #1677ff;
+  color: #fff;
   border: none;
-  border-radius: 25px;
-  font-size: 15px;
+  border-radius: 8px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s;
-  box-shadow: 0 4px 15px rgba(22, 119, 255, 0.35);
+  margin-left: 8px;
 }
 
-.btn-search:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(22, 119, 255, 0.45);
+.btn-search-inline:hover {
+  background: #0958d9;
 }
 
-.btn-search:active {
-  transform: translateY(0);
+.search-input-wrap {
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+
+/* 搜索下拉 */
+.search-wrap {
+  position: relative;
+}
+
+.search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: -28px;
+  z-index: 300;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+  max-height: 340px;
+  overflow-y: auto;
+  margin-top: 4px;
+  min-width: 400px;
+}
+
+.search-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.1s;
+  border-bottom: 1px solid #f8f8f8;
+}
+
+.search-dropdown-item:last-child {
+  border-bottom: none;
+}
+
+.search-dropdown-item:hover {
+  background: #f0f5ff;
+}
+
+.sug-code {
+  font-weight: 600;
+  color: #1677ff;
+  min-width: 60px;
+}
+
+.sug-name {
+  flex: 1;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sug-type {
+  font-size: 11px;
+  color: #999;
+  background: #f5f5f5;
+  padding: 1px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.btn-update,
+.btn-fill-risk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.btn-update {
+  background: #1677ff;
+  color: #fff;
+  border: 1px solid #1677ff;
+}
+
+.btn-update:hover:not(:disabled) { background: #0958d9; }
+
+.btn-fill-risk {
+  background: #fff;
+  color: #1677ff;
+  border: 1px solid #1677ff;
+}
+
+.btn-fill-risk:hover:not(:disabled) { background: #f0f5ff; }
+
+.btn-update:disabled,
+.btn-fill-risk:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* 结果区域 */
@@ -1998,6 +1556,17 @@ export default {
   background: #eef2ff;
   color: #667eea;
   font-weight: 500;
+}
+
+.dropdown-item.unavailable {
+  color: #ccc;
+  cursor: default;
+}
+
+.unavailable-hint {
+  font-size: 10px;
+  color: #ddd;
+  margin-left: auto;
 }
 
 .dropdown-empty {
@@ -2212,8 +1781,13 @@ export default {
 .empty-state,
 .initial-state {
   text-align: center;
-  padding: 60px 20px;
+  padding: 120px 20px;
   color: #666;
+  min-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 .loading-spinner {
@@ -2224,6 +1798,16 @@ export default {
   border-radius: 50%;
   border-top-color: transparent;
   animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.loading-spinner.small {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  border-color: #fa8c16;
+  border-top-color: transparent;
 }
 
 .loading-spinner.large {
@@ -2256,5 +1840,353 @@ export default {
 .sub-hint {
   font-size: 0.8rem;
   color: #6b7280;
+}
+
+/* ── New ifund-style filter layout ── */
+.filter-bar {
+  background: #fff;
+  border-radius: 8px;
+}
+
+.filter-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.search-wrap,
+.type-select-wrap {
+  display: flex;
+  align-items: center;
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 0 10px;
+  transition: border-color 0.2s;
+}
+
+.search-wrap:focus-within,
+.type-select-wrap:focus-within {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.08);
+}
+
+.input-icon {
+  font-size: 14px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.filter-keyword {
+  border: none;
+  background: transparent;
+  padding: 8px 0;
+  font-size: 14px;
+  outline: none;
+  min-width: 240px;
+  flex: 1;
+}
+
+.filter-type-select {
+  border: none;
+  background: transparent;
+  padding: 8px 0;
+  font-size: 13px;
+  outline: none;
+  min-width: 120px;
+  cursor: pointer;
+}
+
+.type-count {
+  font-size: 11px;
+  color: #1677ff;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.btn-query {
+  padding: 8px 20px;
+  background: #1677ff;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-query:hover { background: #0958d9; }
+
+.btn-reset {
+  padding: 8px 16px;
+  background: #fff;
+  color: #666;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-reset:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+  background: #f0f5ff;
+}
+
+.selected-types-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.type-tag-selected {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: #f0f5ff;
+  border: 1px solid #b3d4ff;
+  border-radius: 16px;
+  font-size: 12px;
+  color: #1677ff;
+  cursor: pointer;
+}
+
+.type-tag-selected:hover {
+  background: #e6f0ff;
+  border-color: #1677ff;
+}
+
+/* Advanced toggle */
+.advanced-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  margin-top: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+  cursor: pointer;
+  user-select: none;
+  background: #f8f9fa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.advanced-toggle:hover {
+  color: #1677ff;
+  border-color: #1677ff;
+  background: #f0f5ff;
+}
+
+.toggle-arrow { font-size: 10px; }
+
+/* Advanced section */
+.advanced-section {
+  padding: 14px;
+  margin-top: 8px;
+  background: #fafbfc;
+  border: 1px solid #eee;
+  border-radius: 8px;
+}
+
+.adv-grid-simple {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.adv-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid #eee;
+  border-radius: 8px;
+}
+
+.adv-item label {
+  font-size: 13px;
+  color: #555;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.adv-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.adv-inp {
+  width: 80px;
+  padding: 6px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+.adv-inp:focus {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.08);
+}
+
+.adv-inp::placeholder {
+  color: #ccc;
+  font-size: 12px;
+}
+
+.adv-sep {
+  color: #bbb;
+  font-size: 14px;
+}
+
+.adv-unit {
+  font-size: 12px;
+  color: #999;
+  flex-shrink: 0;
+}
+
+/* ── 自定义类型下拉 ── */
+.type-select-wrap {
+  position: relative;
+}
+
+.type-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 4px 8px 0;
+  cursor: pointer;
+  min-width: 100px;
+  font-size: 13px;
+  user-select: none;
+}
+
+.type-trigger-text {
+  color: #333;
+}
+
+.type-trigger-arrow {
+  font-size: 10px;
+  color: #999;
+  transition: transform 0.2s;
+}
+
+.type-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 200;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  max-height: 420px;
+  overflow-y: auto;
+  min-width: 220px;
+  padding: 4px 0;
+}
+
+.type-cat-group {
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.type-cat-group:last-child {
+  border-bottom: none;
+}
+
+.type-cat-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #555;
+  transition: background 0.15s;
+}
+
+.type-cat-header:hover {
+  background: #f0f5ff;
+}
+
+.type-cat-header.all {
+  color: #1677ff;
+  background: #f0f5ff;
+}
+
+.type-cat-header.partial {
+  color: #1677ff;
+}
+
+.cat-check {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #d9d9d9;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.type-cat-header.all .cat-check,
+.type-cat-header.partial .cat-check {
+  background: #1677ff;
+  border-color: #1677ff;
+  color: #fff;
+}
+
+.type-cat-items {
+  padding: 2px 14px 8px 36px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.type-item-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid #e8e8e8;
+  border-radius: 14px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #666;
+  transition: all 0.15s;
+  user-select: none;
+}
+
+.type-item-label:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+}
+
+.type-item-label.active {
+  background: #f0f5ff;
+  border-color: #1677ff;
+  color: #1677ff;
+  font-weight: 500;
+}
+
+.type-checkbox {
+  display: none;
 }
 </style>

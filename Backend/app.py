@@ -3,7 +3,7 @@ from flask_cors import CORS
 from database import init_db, SessionLocal
 from models import (FundBasicInfo, FundTrend, FundEstimate, FundPortfolio, 
                     FundExtraData, FundWatchlist, FundWatchlistGroup, 
-                    FundRiskMetrics, FundScreeningRank)
+                    FundRiskMetrics, FundScreeningRank, DataFetchTask, FundNavHistory)
 from fund_api import FundAPI
 from fund_list_cache import get_fund_list_cache
 from ai_service import get_ai_service
@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 import json
 import math
 import os
+import sys
+import time
 import threading
 import time
 import re
@@ -1714,6 +1716,450 @@ def _save_fund_data_to_db(db: Session, fund_code: str, data: dict):
 # ==================== 基金筛选功能 ====================
 
 # 全局变量：批量更新状态
+SCREENING_SNAPSHOT_TYPES = ['gp', 'hh', 'zq', 'zs', 'qdii', 'fof']
+
+
+def _fund_type_lookup():
+    lookup = {}
+    for item in fund_list_cache.fund_list:
+        code = _normalize_fund_code(item.get('CODE', ''))
+        if code:
+            lookup[code] = {
+                'name': item.get('NAME') or '',
+                'type': item.get('TYPE') or '',
+            }
+    return lookup
+
+
+def _matches_fund_type(fund_type, selected_types):
+    if not selected_types:
+        return True
+    text = str(fund_type or '')
+    return any(str(selected or '') in text for selected in selected_types)
+
+
+def _snapshot_performance(item):
+    return {
+        '1_month_return': item.get('return1m'),
+        '3_month_return': item.get('return3m'),
+        '6_month_return': item.get('return6m'),
+        '1_year_return': item.get('return1y'),
+        '2_year_return': item.get('return2y'),
+        '3_year_return': item.get('return3y'),
+        'ytd_return': item.get('ytd'),
+        'since_inception_return': item.get('sinceInception'),
+    }
+
+
+def _save_screening_snapshot_item(db, item, type_lookup):
+    code = _normalize_fund_code(item.get('code', ''))
+    if not code:
+        return False
+
+    cached = type_lookup.get(code, {})
+    fund_name = item.get('name') or cached.get('name') or code
+    fund_type = item.get('type') or cached.get('type') or ''
+    performance = _snapshot_performance(item)
+    basic_info = {
+        'fund_code': code,
+        'fund_name': fund_name,
+        'fund_type': fund_type,
+        'net_worth': item.get('nav'),
+        'net_worth_date': item.get('navDate'),
+        'fee': item.get('fee'),
+        'source': item.get('source'),
+    }
+
+    record = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == code).first()
+    if record:
+        record.fund_name = fund_name
+        record.fund_type = fund_type
+        record.return_1y = item.get('return1y')
+        record.basic_json = _json_dumps(basic_info)
+        record.performance_json = _json_dumps(performance)
+        record.updated_time = datetime.now()
+    else:
+        db.add(FundBasicInfo(
+            fund_code=code,
+            fund_name=fund_name,
+            fund_type=fund_type,
+            return_1y=item.get('return1y'),
+            basic_json=_json_dumps(basic_info),
+            performance_json=_json_dumps(performance),
+        ))
+
+    nav_date = item.get('navDate')
+    nav = item.get('nav')
+    if nav_date and nav is not None:
+        try:
+            nav_value = float(nav)
+            nav_record = db.query(FundNavHistory).filter(
+                FundNavHistory.fund_code == code,
+                FundNavHistory.trade_date == str(nav_date),
+            ).first()
+            if not nav_record:
+                nav_record = FundNavHistory(fund_code=code, trade_date=str(nav_date))
+                db.add(nav_record)
+            nav_record.nav = nav_value
+            nav_record.fetch_time = datetime.now()
+            nav_record.updated_time = datetime.now()
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+def _fetch_screening_snapshot_items(limit=None, db=None, task_id=None):
+    items = []
+    max_count = int(limit) if limit else None
+    client = get_data_service_client()
+    total_types = len(SCREENING_SNAPSHOT_TYPES)
+    t0 = time.time()
+
+    print(f"[筛查更新] 开始获取批量排行 (共{total_types}类)...", flush=True)
+
+    for idx, type_code in enumerate(SCREENING_SNAPSHOT_TYPES, 1):
+        if max_count and len(items) >= max_count:
+            break
+
+        t1 = time.time()
+        _set_screening_progress(
+            db, task_id,
+            message=f"获取排行 ({idx}/{total_types}): {type_code}",
+            current_count=len(items),
+        )
+
+        try:
+            payload = client.get_fund_screening_snapshot([type_code], page_size=500, sort='1nzf')
+            elapsed = time.time() - t1
+        except DataServiceError as e:
+            print(f"[筛查更新] {type_code}: DataService错误({time.time()-t1:.1f}s): {e}", flush=True)
+            _set_screening_progress(
+                db, task_id,
+                message=f"获取排行 ({idx}/{total_types}): {type_code} 失败, 跳过",
+                current_count=len(items),
+            )
+            continue
+        except Exception as e:
+            print(f"[筛查更新] {type_code}: 未知错误({time.time()-t1:.1f}s): {e}", flush=True)
+            _set_screening_progress(
+                db, task_id,
+                message=f"获取排行 ({idx}/{total_types}): {type_code} 异常, 跳过",
+                current_count=len(items),
+            )
+            continue
+
+        data = payload.get('data', {}) if isinstance(payload, dict) else {}
+        page_items = data.get('items', []) if isinstance(data, dict) else []
+        failed_pages = data.get('failedPages', []) if isinstance(data, dict) else []
+        if failed_pages:
+            print(f"[筛查更新] {type_code}: {len(failed_pages)}个失败页: {failed_pages[:3]}", flush=True)
+
+        remaining = None if max_count is None else max_count - len(items)
+        new_items = page_items if remaining is None else page_items[:remaining]
+        items.extend(new_items)
+
+        print(f"[筛查更新] {type_code}: +{len(new_items)}只 ({elapsed:.1f}s), 累计{len(items)}只", flush=True)
+
+        _set_screening_progress(
+            db, task_id,
+            message=f"获取排行 ({idx}/{total_types}): {type_code} ✓ (+{len(new_items)}, 累计 {len(items)})",
+            current_count=len(items),
+        )
+
+    print(f"[筛查更新] 批量排行获取完成: {len(items)}只, 耗时{time.time()-t0:.1f}s", flush=True)
+    return items
+
+
+def _nav_history_to_risk_input(payload):
+    data = payload.get('data', {}) if isinstance(payload, dict) else {}
+    items = data.get('items', []) if isinstance(data, dict) else []
+    trend = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        nav = item.get('nav')
+        date = item.get('date')
+        if nav is not None and date:
+            trend.append({'date': str(date), 'net_worth': nav})
+    return trend
+
+
+def _nav_history_payload_items(payload):
+    data = payload.get('data', {}) if isinstance(payload, dict) else {}
+    items = data.get('items', []) if isinstance(data, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _latest_cached_nav_date(db, fund_code):
+    row = db.query(FundNavHistory.trade_date).filter(
+        FundNavHistory.fund_code == fund_code
+    ).order_by(desc(FundNavHistory.trade_date)).first()
+    return row[0] if row else None
+
+
+def _load_nav_history_rows(db, fund_code):
+    rows = db.query(FundNavHistory).filter(
+        FundNavHistory.fund_code == fund_code,
+        FundNavHistory.nav.isnot(None),
+    ).order_by(FundNavHistory.trade_date.asc()).all()
+    return [
+        {
+            'date': row.trade_date,
+            'net_worth': row.nav,
+        }
+        for row in rows
+    ]
+
+
+def _upsert_nav_history_rows(db, fund_code, payload):
+    now = datetime.now()
+    count = 0
+    for item in _nav_history_payload_items(payload):
+        if not isinstance(item, dict):
+            continue
+        trade_date = item.get('date')
+        nav = item.get('nav')
+        if not trade_date or nav is None:
+            continue
+        try:
+            nav_value = float(nav)
+        except (TypeError, ValueError):
+            continue
+
+        record = db.query(FundNavHistory).filter(
+            FundNavHistory.fund_code == fund_code,
+            FundNavHistory.trade_date == str(trade_date),
+        ).first()
+        if not record:
+            record = FundNavHistory(
+                fund_code=fund_code,
+                trade_date=str(trade_date),
+            )
+            db.add(record)
+        record.nav = nav_value
+        record.acc_nav = item.get('accNav')
+        record.daily_return = item.get('dailyReturn')
+        record.fetch_time = now
+        record.updated_time = now
+        count += 1
+    return count
+
+
+def _snapshot_nav_date(db, fund_code):
+    basic = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == fund_code).first()
+    if not basic:
+        return None
+    basic_info = _json_loads(basic.basic_json, {})
+    return basic_info.get('net_worth_date') or basic_info.get('navDate')
+
+
+def _nav_cache_is_fresh(db, fund_code):
+    latest_cached = _latest_cached_nav_date(db, fund_code)
+    latest_snapshot = _snapshot_nav_date(db, fund_code)
+    if not latest_cached:
+        return False
+    if latest_snapshot and latest_cached < str(latest_snapshot):
+        return False
+    return True
+
+
+def _sync_nav_history_ifund_style(db, fund_code, force=False):
+    fund_code = _normalize_fund_code(fund_code)
+    if not fund_code:
+        return 0
+    if not force and _nav_cache_is_fresh(db, fund_code):
+        return 0
+    latest_cached = _latest_cached_nav_date(db, fund_code)
+    # force=True 时从头全量拉取（用于初始填充），否则增量拉取
+    if force:
+        start_date = None
+    elif latest_cached:
+        try:
+            start_date = (datetime.strptime(latest_cached, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+        except ValueError:
+            start_date = None
+    else:
+        start_date = None
+    payload = get_data_service_client().get_fund_nav_history(fund_code, start_date=start_date)
+    inserted = _upsert_nav_history_rows(db, fund_code, payload)
+    db.commit()
+    return inserted
+
+
+def update_single_fund_risk_metrics(fund_code, db):
+    fund_code = _normalize_fund_code(fund_code)
+    try:
+        # 先检查现有净值数据量，不足30条时强制全量同步
+        existing_rows = db.query(FundNavHistory).filter(
+            FundNavHistory.fund_code == fund_code,
+            FundNavHistory.nav.isnot(None)
+        ).count()
+        force_sync = existing_rows < 30
+        _sync_nav_history_ifund_style(db, fund_code, force=force_sync)
+        net_worth_trend = _load_nav_history_rows(db, fund_code)
+        if len(net_worth_trend) < 30:
+            print(f"[补充风险] 跳过 {fund_code}: 净值不足({len(net_worth_trend)}条)", flush=True)
+            return False
+        risk_metrics = calculate_risk_metrics(net_worth_trend)
+        if not risk_metrics:
+            print(f"[补充风险] 跳过 {fund_code}: 风险计算失败(可能数据异常或基金太新)", flush=True)
+            return False
+        _save_risk_metrics(db, fund_code, risk_metrics)
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        print(f"[补充风险] 异常 {fund_code}: {e}", flush=True)
+        return False
+
+
+def _select_nav_candidates(db, nav_limit):
+    rows = db.query(FundBasicInfo, FundScreeningRank).outerjoin(
+        FundScreeningRank, FundBasicInfo.fund_code == FundScreeningRank.fund_code
+    ).all()
+    candidates = []
+    for basic, rank in rows:
+        if not basic:
+            continue
+        rank_1y = rank.rank_pct_1y if rank else None
+        pass_4433 = bool(rank and rank.pass_4433 == 1)
+        if pass_4433 or (rank_1y is not None and rank_1y <= 30):
+            candidates.append({
+                'code': basic.fund_code,
+                'name': basic.fund_name,
+                'type': basic.fund_type or '',
+                'rank_1y': rank_1y if rank_1y is not None else 9999,
+                'pass_4433': pass_4433,
+            })
+
+    candidates.sort(key=lambda item: (0 if item['pass_4433'] else 1, item['rank_1y'], item['code']))
+    if nav_limit is None or len(candidates) <= nav_limit:
+        return candidates
+
+    by_type = {}
+    for item in candidates:
+        by_type.setdefault(item['type'], []).append(item)
+
+    selected = []
+    per_type = max(1, math.ceil(nav_limit / max(len(by_type), 1)))
+    for items in by_type.values():
+        selected.extend(items[:per_type])
+    if len(selected) < nav_limit:
+        selected_codes = {item['code'] for item in selected}
+        selected.extend(item for item in candidates if item['code'] not in selected_codes)
+    return selected[:nav_limit]
+
+
+def _create_data_fetch_task(db, task_type, options=None, message=''):
+    task = DataFetchTask(
+        task_type=task_type,
+        status='running',
+        target_count=0,
+        current_count=0,
+        success_count=0,
+        fail_count=0,
+        current_item='',
+        message=message,
+        options_json=_json_dumps(options or {}),
+        started_time=datetime.now(),
+        updated_time=datetime.now(),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def _latest_active_task(db):
+    """返回最新的运行中或最近完成的任务（不限类型）"""
+    return db.query(DataFetchTask).filter(
+        DataFetchTask.task_type.in_(['screening_update', 'fill_risk'])
+    ).order_by(desc(DataFetchTask.started_time), desc(DataFetchTask.id)).first()
+
+
+def _is_active_task(task):
+    """检查任务是否仍在活跃运行（超过1小时未更新视为僵死）"""
+    if not task or task.status != 'running':
+        return False
+    reference_time = task.updated_time or task.started_time
+    if reference_time and datetime.now() - reference_time > timedelta(hours=1):
+        task.status = 'failed'
+        task.error_message = '任务超过 6 小时未更新，已标记为陈旧任务'
+        task.message = task.error_message
+        task.finished_time = datetime.now()
+        task.updated_time = datetime.now()
+        return False
+    return True
+
+
+def _task_to_update_status(task):
+    if not task:
+        return {
+            'running': screening_update_status.get('running', False),
+            'progress': screening_update_status.get('progress', 0),
+            'total': screening_update_status.get('total', 0),
+            'current_fund': screening_update_status.get('current_fund', ''),
+            'success_count': screening_update_status.get('success_count', 0),
+            'fail_count': screening_update_status.get('fail_count', 0),
+            'message': screening_update_status.get('message', ''),
+        }
+    result = {
+        'task_id': task.id,
+        'running': task.status == 'running',
+        'progress': task.current_count or 0,
+        'total': task.target_count or 0,
+        'current_fund': task.current_item or '',
+        'success_count': task.success_count or 0,
+        'fail_count': task.fail_count or 0,
+        'message': task.message or '',
+        'status': task.status,
+        'started_time': task.started_time.isoformat() if task.started_time else None,
+        'finished_time': task.finished_time.isoformat() if task.finished_time else None,
+    }
+    # 对于运行中的任务，用内存状态补充 DB 中可能滞后的字段
+    if task.status == 'running':
+        mem_mapping = [
+            ('progress', 'progress'),
+            ('total', 'total'),
+            ('current_fund', 'current_fund'),
+            ('success_count', 'success_count'),
+            ('fail_count', 'fail_count'),
+            ('message', 'message'),
+        ]
+        for mem_key, result_key in mem_mapping:
+            mem_val = screening_update_status.get(mem_key)
+            if mem_val is not None and mem_val != '':
+                result[result_key] = mem_val
+    return result
+
+
+def _set_screening_progress(db=None, task_id=None, **fields):
+    key_map = {
+        'current_count': 'progress',
+        'target_count': 'total',
+        'current_item': 'current_fund',
+    }
+    for key, value in fields.items():
+        memory_key = key_map.get(key, key)
+        if memory_key in screening_update_status:
+            screening_update_status[memory_key] = value
+
+    if not db or not task_id:
+        return
+
+    task = db.query(DataFetchTask).filter(DataFetchTask.id == task_id).first()
+    if not task:
+        return
+
+    for key, value in fields.items():
+        if hasattr(task, key):
+            setattr(task, key, value)
+    if fields.get('status') in ('finished', 'failed', 'stopped'):
+        task.finished_time = datetime.now()
+    task.updated_time = datetime.now()
+    db.commit()
+
+
 screening_update_status = {
     'running': False,
     'progress': 0,
@@ -1928,112 +2374,333 @@ screening_update_status = {
 screening_stop_flag = False
 
 
-def update_single_fund_data(fund_code, db):
-    fund_code = _normalize_fund_code(fund_code)
-    """
-    更新单只基金的完整数据（简化版）
-    直接获取详情数据，更新所有相关表
-    """
-    try:
-        # 获取完整的基金数据
-        fund_data = fund_api.get_fund_data(fund_code)
-        if not fund_data:
-            return False
-        
-        # 保存到所有相关表
-        _save_fund_data_to_db(db, fund_code, fund_data)
-        
-        # 计算并保存风险指标
-        net_worth_trend = fund_data.get('net_worth_trend', [])
-        if net_worth_trend and len(net_worth_trend) >= 30:
-            risk_metrics = calculate_risk_metrics(net_worth_trend)
-            if risk_metrics:
-                _save_risk_metrics(db, fund_code, risk_metrics)
-        
-        return True
-    except Exception as e:
-        print(f"Error updating data for {fund_code}: {e}")
-        return False
-
-
-def batch_update_fund_data(fund_types=None, limit=None):
-    """
-    批量更新基金数据（简化版）
-    直接获取每只基金的完整详情数据
-    """
+def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise_limit=500, task_id=None):
+    """Run the ifund-style screening refresh: local snapshot first, optional candidate NAV sync."""
     global screening_update_status, screening_stop_flag
-    
-    if screening_update_status['running']:
-        return {'error': '更新任务正在进行中'}
-    
-    screening_update_status['running'] = True
-    screening_update_status['start_time'] = datetime.now()
-    screening_update_status['message'] = '正在获取基金列表...'
-    screening_stop_flag = False
-    
+
+    db = SessionLocal()
+    t0 = time.time()
+    print(f"[筛查更新] ========== 开始批量更新 ({mode}) ==========", flush=True)
     try:
-        # 获取基金列表
-        fund_list = fund_list_cache.fund_list
-        
-        # 按类型筛选
+        if not task_id:
+            task = _create_data_fetch_task(
+                db,
+                'screening_update',
+                {
+                    'fund_types': fund_types or [],
+                    'limit': limit,
+                    'mode': mode,
+                    'nav_limit': precise_limit,
+                },
+                message='获取批量排行...',
+            )
+            task_id = task.id
+
+        if mode == 'sync_only':
+            mode = 'sync_only'
+        else:
+            mode = 'sync_nav'
+        if precise_limit is not None:
+            try:
+                precise_limit = max(1, int(precise_limit))
+            except (TypeError, ValueError):
+                precise_limit = 500
+
+        screening_stop_flag = False
+        screening_update_status.update({
+            'running': True,
+            'progress': 0,
+            'total': 0,
+            'current_fund': '',
+            'success_count': 0,
+            'fail_count': 0,
+            'start_time': datetime.now(),
+            'message': '获取批量排行...',
+        })
+        _set_screening_progress(db, task_id, status='running', message='获取批量排行...')
+
+        fund_list = _fetch_screening_snapshot_items(limit=limit, db=db, task_id=task_id)
+        t_lookup_start = time.time()
+        type_lookup = _fund_type_lookup()
+        print(f"[筛查更新] 类型查找表构建: {len(type_lookup)}条 ({time.time()-t_lookup_start:.1f}s)", flush=True)
+
         if fund_types:
-            fund_list = [f for f in fund_list if any(t in f.get('TYPE', '') for t in fund_types)]
-        
-        # 限制数量
-        if limit:
-            fund_list = fund_list[:limit]
-        
-        screening_update_status['total'] = len(fund_list)
-        screening_update_status['progress'] = 0
-        screening_update_status['success_count'] = 0
-        screening_update_status['fail_count'] = 0
-        
-        db = SessionLocal()
-        
-        for i, fund in enumerate(fund_list):
-            # 检查停止标志
+            before_filter = len(fund_list)
+            fund_list = [
+                item for item in fund_list
+                if _matches_fund_type(
+                    item.get('type') or type_lookup.get(_normalize_fund_code(item.get('code')), {}).get('type'),
+                    fund_types,
+                )
+            ]
+            print(f"[筛查更新] 类型筛选: {before_filter} → {len(fund_list)}只 (筛选条件: {fund_types})", flush=True)
+
+        success_count = 0
+        fail_count = 0
+        total_to_save = len(fund_list)
+        print(f"[筛查更新] 开始写入基础数据: {total_to_save}只...", flush=True)
+        _set_screening_progress(
+            db,
+            task_id,
+            message='写入基础数据...',
+            target_count=total_to_save,
+            current_count=0,
+            success_count=0,
+            fail_count=0,
+            current_item='',
+        )
+
+        for index, fund in enumerate(fund_list, 1):
             if screening_stop_flag:
-                screening_update_status['message'] = f"已手动停止。成功: {screening_update_status['success_count']}, 失败: {screening_update_status['fail_count']}"
-                break
-            
-            fund_code = fund.get('CODE', '')
-            screening_update_status['progress'] = i + 1
-            screening_update_status['current_fund'] = f"{fund_code} - {fund.get('NAME', '')}"
-            screening_update_status['message'] = f"正在处理: {screening_update_status['current_fund']}"
-            
-            if update_single_fund_data(fund_code, db):
-                screening_update_status['success_count'] += 1
+                _set_screening_progress(
+                    db,
+                    task_id,
+                    status='stopped',
+                    message=f"已手动停止。成功: {success_count}, 失败: {fail_count}",
+                    current_count=index - 1,
+                    success_count=success_count,
+                    fail_count=fail_count,
+                )
+                return {'success': False, 'stopped': True}
+
+            fund_code = _normalize_fund_code(fund.get('code', ''))
+            if _save_screening_snapshot_item(db, fund, type_lookup):
+                success_count += 1
             else:
-                screening_update_status['fail_count'] += 1
-            
-            # 每10只基金提交一次
-            if (i + 1) % 10 == 0:
-                db.commit()
-            
-            # 添加延迟，避免请求过于频繁
-            time.sleep(0.3)
-        
+                fail_count += 1
+
+            screening_update_status.update({
+                'progress': index,
+                'current_fund': f"{fund_code} - {fund.get('name', '')}",
+                'success_count': success_count,
+                'fail_count': fail_count,
+            })
+
+            db.commit()
+            _set_screening_progress(
+                db,
+                task_id,
+                current_count=index,
+                current_item=f"{fund_code} - {fund.get('name', '')}",
+                success_count=success_count,
+                fail_count=fail_count,
+            )
+
+            if index % 500 == 0:
+                print(f"[筛查更新] 写入进度: {index}/{total_to_save} (成功{success_count}, 失败{fail_count})", flush=True)
+
         db.commit()
-        
+        print(f"[筛查更新] 基础数据写入完成: 成功{success_count}, 失败{fail_count}, 耗时{time.time()-t0:.1f}s", flush=True)
+
         if not screening_stop_flag:
-            # 计算同类型排名
-            screening_update_status['message'] = '正在计算同类型排名...'
+            print(f"[筛查更新] 开始计算同类排名...", flush=True)
+            _set_screening_progress(db, task_id, message='计算同类排名...', current_item='')
             calculate_same_type_rankings(db)
-            screening_update_status['message'] = f"更新完成！成功: {screening_update_status['success_count']}, 失败: {screening_update_status['fail_count']}"
-        
-        db.close()
-        
-    except Exception as e:
-        screening_update_status['message'] = f"更新失败: {str(e)}"
+            print(f"[筛查更新] 同类排名计算完成", flush=True)
+
+        if not screening_stop_flag and mode == 'sync_nav':
+            candidates = _select_nav_candidates(db, precise_limit)
+            nav_success = 0
+            nav_fail = 0
+            _set_screening_progress(
+                db,
+                task_id,
+                message='补齐候选净值并计算风险指标...',
+                target_count=len(candidates),
+                current_count=0,
+                success_count=0,
+                fail_count=0,
+                current_item='',
+            )
+
+            for index, fund in enumerate(candidates, 1):
+                if screening_stop_flag:
+                    _set_screening_progress(
+                        db,
+                        task_id,
+                        status='stopped',
+                        message=f"已手动停止。净值同步成功: {nav_success}, 失败: {nav_fail}",
+                        current_count=index - 1,
+                        success_count=nav_success,
+                        fail_count=nav_fail,
+                    )
+                    return {'success': False, 'stopped': True}
+
+                current_item = f"{fund['code']} - {fund.get('name', '')}"
+                _set_screening_progress(
+                    db,
+                    task_id,
+                    current_count=index,
+                    current_item=current_item,
+                )
+                if update_single_fund_risk_metrics(fund['code'], db):
+                    nav_success += 1
+                else:
+                    nav_fail += 1
+                _set_screening_progress(
+                    db,
+                    task_id,
+                    success_count=nav_success,
+                    fail_count=nav_fail,
+                )
+
+            success_count = nav_success
+            fail_count = nav_fail
+
+        message = f"完成。模式: {mode}, 成功: {success_count}, 失败: {fail_count}"
+        _set_screening_progress(
+            db,
+            task_id,
+            status='finished',
+            message=message,
+            success_count=success_count,
+            fail_count=fail_count,
+            current_item='',
+        )
+        screening_update_status['running'] = False
+        return {
+            'success': True,
+            'total': screening_update_status['total'],
+            'success_count': success_count,
+            'fail_count': fail_count,
+        }
+    except Exception as exc:
+        db.rollback()
+        message = f"更新失败: {exc}"
+        screening_update_status['message'] = message
+        screening_update_status['running'] = False
+        _set_screening_progress(db, task_id, status='failed', message=message, error_message=str(exc))
+        return {'success': False, 'error': str(exc)}
     finally:
         screening_update_status['running'] = False
-    
-    return {
-        'success': True,
-        'total': screening_update_status['total'],
-        'success_count': screening_update_status['success_count'],
-        'fail_count': screening_update_status['fail_count']
-    }
+        db.close()
+
+
+def batch_fill_risk_metrics(db=None, task_id=None):
+    """批量补全缺失的风险指标（回撤/波动率/夏普/卡玛）。
+    处理那些已有足够净值历史(>=30条)但尚未计算风险指标的基金。
+    作为后台任务运行，支持停止信号。"""
+    global screening_update_status, screening_stop_flag
+
+    own_db = None
+    if db is None:
+        own_db = SessionLocal()
+        db = own_db
+
+    try:
+        # 查找所有有基本信息但无风险指标的基金（不限净值条数，后续会先同步净值再计算）
+        all_basic_codes = set()
+        for row in db.query(FundBasicInfo.fund_code).all():
+            all_basic_codes.add(row[0])
+
+        risk_codes = set()
+        for row in db.query(FundRiskMetrics.fund_code).filter(
+            FundRiskMetrics.sharpe_ratio_1y.isnot(None)
+        ).all():
+            risk_codes.add(row[0])
+
+        missing_codes = sorted(all_basic_codes - risk_codes)
+
+        # 统计净值情况
+        nav_count = db.query(FundNavHistory.fund_code).filter(
+            FundNavHistory.nav.isnot(None)
+        ).distinct().count()
+
+        print(f"[补充风险] 缺风险指标: {len(missing_codes)}只 (总计:{len(all_basic_codes)}, 有风险:{len(risk_codes)}, 有净值记录基金:{nav_count})", flush=True)
+
+        if not missing_codes:
+            print("[补充风险] 无需补充，所有基金已有风险指标", flush=True)
+            screening_update_status['running'] = False
+            return {'success': True, 'total': 0, 'message': '所有基金已有风险指标'}
+
+        screening_update_status.update({
+            'running': True,
+            'progress': 0,
+            'total': len(missing_codes),
+            'current_fund': '',
+            'success_count': 0,
+            'fail_count': 0,
+            'message': '补充风险指标...',
+        })
+        _set_screening_progress(
+            db, task_id,
+            status='running',
+            message='补充风险指标...',
+            target_count=len(missing_codes),
+            current_count=0,
+            success_count=0,
+            fail_count=0,
+        )
+
+        success = 0
+        fail = 0
+        for idx, code in enumerate(missing_codes, 1):
+            if screening_stop_flag:
+                _set_screening_progress(db, task_id, status='stopped',
+                    message=f"已停止。成功{success}, 失败{fail}")
+                return {'success': False, 'stopped': True}
+
+            current_item = f"{code}"
+            screening_update_status.update({
+                'progress': idx,
+                'current_fund': current_item,
+                'success_count': success,
+                'fail_count': fail,
+            })
+
+            if update_single_fund_risk_metrics(code, db):
+                success += 1
+            else:
+                fail += 1
+
+            db.commit()
+            _set_screening_progress(db, task_id,
+                current_count=idx, current_item=current_item,
+                success_count=success, fail_count=fail)
+
+            if idx % 100 == 0:
+                print(f"[补充风险] 进度: {idx}/{len(missing_codes)} (成功{success}, 失败{fail})", flush=True)
+
+        print(f"[补充风险] 完成: 成功{success}, 失败{fail}", flush=True)
+        _set_screening_progress(db, task_id, status='finished',
+            message=f"补充完成。成功{success}, 失败{fail}",
+            success_count=success, fail_count=fail)
+        screening_update_status['running'] = False
+        return {'success': True, 'success_count': success, 'fail_count': fail}
+
+    except Exception as e:
+        print(f"[补充风险] 失败: {e}", flush=True)
+        screening_update_status['running'] = False
+        _set_screening_progress(db, task_id, status='failed', message=str(e))
+        return {'success': False, 'error': str(e)}
+    finally:
+        if own_db:
+            own_db.close()
+
+
+@app.route('/api/screening/fill-risk', methods=['POST'])
+def start_fill_risk():
+    """启动后台补全风险指标任务"""
+    global screening_update_status
+    if screening_update_status.get('running'):
+        return jsonify({'error': '已有更新任务在进行中'}), 409
+
+    def _run():
+        db = SessionLocal()
+        try:
+            task = _create_data_fetch_task(db, 'fill_risk', message='补充风险指标...')
+            batch_fill_risk_metrics(db=db, task_id=task.id)
+        except Exception as e:
+            print(f"[补充风险] 线程异常: {e}", flush=True)
+            screening_update_status['running'] = False
+        finally:
+            db.close()
+
+    import threading
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return jsonify({'message': '补充风险指标任务已启动'})
+
 
 
 @app.route('/api/screening/status', methods=['GET'])
@@ -2047,6 +2714,7 @@ def get_screening_status():
         FundRiskMetrics.sharpe_ratio_1y.isnot(None)
     ).count()
     rank_count = db.query(FundScreeningRank).count()
+    nav_history_count = db.query(FundNavHistory).count()
     pass_4433_count = db.query(FundScreeningRank).filter(
         FundScreeningRank.pass_4433 == 1
     ).count()
@@ -2066,40 +2734,106 @@ def get_screening_status():
         if t:
             type_counts[t] = c
     
+    latest_task = _latest_active_task(db)
+    if latest_task and latest_task.status == 'running' and not _is_active_task(latest_task):
+        db.commit()
+
     return jsonify({
         'basic_count': basic_count,
         'risk_metrics_count': risk_count,
         'ranking_count': rank_count,
+        'nav_history_count': nav_history_count,
         'pass_4433_count': pass_4433_count,
         'latest_update': latest_update,
         'type_counts': type_counts,
-        'update_status': {
-            'running': screening_update_status['running'],
-            'progress': screening_update_status['progress'],
-            'total': screening_update_status['total'],
-            'current_fund': screening_update_status['current_fund'],
-            'message': screening_update_status['message']
-        }
+        'update_status': _task_to_update_status(latest_task)
     })
+
+
+@app.route('/api/screening/progress', methods=['GET'])
+def get_screening_progress():
+    """获取更新进度 — 以DB DataFetchTask 为准，内存仅作补充"""
+    try:
+        db = get_db()
+        task = _latest_active_task(db)
+    except Exception:
+        task = None
+
+    # 先从内存读取
+    result = {
+        'running': screening_update_status.get('running', False),
+        'progress': screening_update_status.get('progress', 0),
+        'total': screening_update_status.get('total', 0),
+        'current_fund': screening_update_status.get('current_fund', ''),
+        'success_count': screening_update_status.get('success_count', 0),
+        'fail_count': screening_update_status.get('fail_count', 0),
+        'message': screening_update_status.get('message', ''),
+    }
+
+    # DB中有运行中任务时，以DB为准覆盖（后台线程每只基金commit一次，DB数据最可靠）
+    if task:
+        if task.status == 'running':
+            result['running'] = True
+            # DB值优先（只要DB有数据就用DB的）
+            if task.target_count:
+                result['total'] = task.target_count
+            if task.current_count is not None:
+                result['progress'] = task.current_count
+            if task.current_item:
+                result['current_fund'] = task.current_item
+            if task.success_count is not None:
+                result['success_count'] = task.success_count
+            if task.fail_count is not None:
+                result['fail_count'] = task.fail_count
+            if task.message:
+                result['message'] = task.message
+            # 同步内存状态（修复线程异常导致running=false的问题）
+            if not screening_update_status.get('running'):
+                screening_update_status['running'] = True
+        elif task.status in ('finished', 'stopped', 'failed'):
+            result['running'] = False
+            result['message'] = task.message or result['message']
+
+    return jsonify(result)
 
 
 @app.route('/api/screening/update', methods=['POST'])
 def start_screening_update():
     """启动基金数据批量更新"""
     data = request.get_json() or {}
-    fund_types = data.get('fund_types', ['混合型-偏股', '混合型-灵活', '股票型'])
+    fund_types = data.get('fund_types') or []
     limit = data.get('limit')  # 可选：限制更新数量（测试用）
+    mode = data.get('mode') or 'sync_nav'
+    precise_limit = data.get('precise_limit', 500)
+    db = get_db()
+    latest_task = _latest_active_task(db)
     
-    if screening_update_status['running']:
+    active_task_running = _is_active_task(latest_task)
+    if latest_task and latest_task.status != 'running':
+        db.commit()
+
+    if screening_update_status['running'] or active_task_running:
         return jsonify({
             'error': '更新任务正在进行中',
-            'status': screening_update_status
+            'status': _task_to_update_status(latest_task)
         }), 409
     
     # 在后台线程执行更新
+    task = _create_data_fetch_task(
+        db,
+        'screening_update',
+        {
+            'fund_types': fund_types,
+            'limit': limit,
+            'mode': mode,
+            'nav_limit': precise_limit,
+        },
+        message='更新任务已启动',
+    )
+
     thread = threading.Thread(
         target=batch_update_fund_data, 
-        args=(fund_types, limit)
+        args=(fund_types, limit, mode, precise_limit, task.id)
     )
     thread.daemon = True
     thread.start()
@@ -2107,16 +2841,34 @@ def start_screening_update():
     return jsonify({
         'message': '更新任务已启动',
         'fund_types': fund_types,
-        'limit': limit
+        'limit': limit,
+        'mode': mode,
+        'nav_limit': precise_limit,
+        'task_id': task.id
     })
 
 
 @app.route('/api/screening/stop', methods=['POST'])
 def stop_screening_update():
     """停止基金数据更新"""
-    global screening_stop_flag
+    global screening_stop_flag, screening_update_status
     screening_stop_flag = True
-    return jsonify({'message': '已发送停止信号'})
+    # 同时强制重置状态，防止卡死
+    screening_update_status['running'] = False
+    screening_update_status['message'] = '已手动停止'
+    # 更新DB中的最新任务状态
+    db = get_db()
+    try:
+        task = _latest_active_task(db)
+        if task and task.status == 'running':
+            task.status = 'stopped'
+            task.message = '已手动停止'
+            task.finished_time = datetime.now()
+            task.updated_time = datetime.now()
+            db.commit()
+    except Exception:
+        pass
+    return jsonify({'message': '已停止并重置状态'})
 
 
 @app.route('/api/screening/recalculate-rankings', methods=['POST'])
@@ -2275,7 +3027,21 @@ def query_screening_funds():
             type_conditions.append(FundBasicInfo.fund_type.like(f'%{t}%'))
         if type_conditions:
             query = query.filter(or_(*type_conditions))
-    
+
+    # 关键词搜索（基金代码/名称）
+    if filters.get('keyword'):
+        kw = f'%{filters["keyword"]}%'
+        query = query.filter(or_(
+            FundBasicInfo.fund_code.like(kw),
+            FundBasicInfo.fund_name.like(kw)
+        ))
+
+    # 近1年收益率范围
+    if filters.get('return_1y_min') is not None:
+        query = query.filter(FundBasicInfo.return_1y >= filters['return_1y_min'])
+    if filters.get('return_1y_max') is not None:
+        query = query.filter(FundBasicInfo.return_1y <= filters['return_1y_max'])
+
     # 快速类型筛选（精确匹配）
     if filters.get('quick_fund_type'):
         query = query.filter(FundBasicInfo.fund_type == filters['quick_fund_type'])
@@ -2484,8 +3250,7 @@ def update_single_fund(fund_code):
     """更新单只基金数据"""
     db = get_db()
     
-    success = update_single_fund_data(fund_code, db)
-    db.commit()
+    success = update_single_fund_risk_metrics(fund_code, db)
     
     if success:
         return jsonify({'message': f'Fund {fund_code} updated successfully'})
@@ -2616,19 +3381,6 @@ def backtest_fixed_investment():
         
         # 获取净值数据
         trend = db.query(FundTrend).filter(FundTrend.fund_code == fund_code).first()
-        if not trend:
-            # 尝试从API获取并保存数据
-            # 注意：这里需要在引入 update_single_fund_data 之前确保其可用
-            # 由于 update_single_fund_data 可能定义在其他地方或需要导入
-            # 这里假设它不可用或逻辑复杂，暂时只依赖已有数据
-            # 或者如果 update_single_fund_data 是在 fund_api 中封装的方法
-            try:
-                # 尝试使用 FundAPI 实例的 update 方法，如果存在的话
-                # 这里假设直接访问数据库查不到就是没有
-                pass 
-            except Exception as e:
-                print(f"Error auto-updating fund: {e}")
-
         if not trend:
             return jsonify({'error': f'Fund data not found for code {fund_code}'}), 404
         
@@ -2937,5 +3689,68 @@ def serve_frontend(path):
         return send_from_directory(static_dir, path)
     return send_from_directory(static_dir, 'index.html')
 
+def _auto_ranking_scheduler():
+    """每周自动重新计算一次同类排名（后台线程，每7天执行一次）"""
+    import threading
+    def _run_weekly():
+        while True:
+            time.sleep(3600)  # 每小时检查一次
+            try:
+                db = SessionLocal()
+                # 检查上次排名计算时间
+                latest_ranking = db.query(FundScreeningRank).order_by(
+                    desc(FundScreeningRank.updated_time)
+                ).first()
+                should_run = False
+                if latest_ranking and latest_ranking.updated_time:
+                    delta = datetime.now() - latest_ranking.updated_time
+                    if delta.total_seconds() > 7 * 24 * 3600:  # 7天
+                        should_run = True
+                else:
+                    should_run = True  # 从未计算过
+                db.close()
+
+                if should_run:
+                    print("[自动排名] 开始每周同类排名计算...", flush=True)
+                    db2 = SessionLocal()
+                    try:
+                        calculate_same_type_rankings(db2)
+                        db2.commit()
+                        print("[自动排名] 每周同类排名计算完成", flush=True)
+                    except Exception as e:
+                        db2.rollback()
+                        print(f"[自动排名] 计算失败: {e}", flush=True)
+                    finally:
+                        db2.close()
+            except Exception as e:
+                print(f"[自动排名] 调度检查失败: {e}", flush=True)
+
+    t = threading.Thread(target=_run_weekly, daemon=True)
+    t.start()
+    print("[自动排名] 后台周度排名调度已启动", flush=True)
+
+
+def _cleanup_stale_tasks_on_startup():
+    """启动时清理上次崩溃残留的运行中任务"""
+    try:
+        db = SessionLocal()
+        stale = db.query(DataFetchTask).filter(
+            DataFetchTask.status == 'running'
+        ).all()
+        for task in stale:
+            task.status = 'failed'
+            task.message = '服务器重启，任务中断'
+            task.finished_time = datetime.now()
+            task.updated_time = datetime.now()
+        if stale:
+            db.commit()
+            print(f"[启动清理] 已将 {len(stale)} 个残留任务标记为失败", flush=True)
+        db.close()
+    except Exception as e:
+        print(f"[启动清理] 失败: {e}", flush=True)
+
+
 if __name__ == '__main__':
+    _cleanup_stale_tasks_on_startup()
+    _auto_ranking_scheduler()
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)

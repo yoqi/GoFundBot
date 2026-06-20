@@ -15,8 +15,8 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-# 获取项目根目录下的 Data 文件夹路径
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 获取 Backend/Data 文件夹路径
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'Data')
 
 
@@ -165,6 +165,8 @@ class FundListCache:
             'Referer': 'https://fund.eastmoney.com/'
         }
         self._load_cache()
+        # 如果缓存超过30天，启动时自动更新
+        self._auto_refresh_if_stale()
     
     def _load_cache(self):
         """从本地文件加载缓存"""
@@ -195,6 +197,26 @@ class FundListCache:
         except Exception as e:
             print(f"[FundListCache] 保存缓存失败: {e}")
     
+    def _auto_refresh_if_stale(self):
+        """如果缓存超过30天，后台线程自动更新"""
+        import threading
+        def _refresh():
+            try:
+                if self.last_update:
+                    try:
+                        last_dt = datetime.strptime(self.last_update[:10], '%Y-%m-%d')
+                        delta = datetime.now() - last_dt
+                        if delta.days < 30:
+                            return  # 不到30天，不更新
+                    except ValueError:
+                        pass
+                print(f"[FundListCache] 缓存过期(>{30}天)，后台更新中...", flush=True)
+                self.update_from_api()
+            except Exception as e:
+                print(f"[FundListCache] 自动更新失败: {e}", flush=True)
+        t = threading.Thread(target=_refresh, daemon=True)
+        t.start()
+
     def update_from_api(self) -> Dict[str, Any]:
         """
         从天天基金API获取全部基金列表并更新本地缓存

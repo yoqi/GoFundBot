@@ -12,6 +12,7 @@ import type {
   FundPositionTrendItemDto,
   FundRankHistoryDto,
   FundScaleFluctuationDto,
+  FundScreeningSnapshotDto,
   FundSearchResultDto,
   FundSubscriptionRedemptionDto,
   FundTotalReturnTrendDto,
@@ -21,6 +22,12 @@ import type { StockReferenceDto } from '../models/stock.js';
 export interface FundNavHistoryOptions {
   startDate?: string;
   endDate?: string;
+}
+
+export interface FundScreeningSnapshotOptions {
+  types?: string[];
+  sort?: string;
+  pageSize?: number;
 }
 
 export interface KlineOptions {
@@ -121,6 +128,7 @@ export interface FundProvider {
   rankHistory(code: string): Promise<FundRankHistoryDto>;
   dividends(code: string): Promise<FundDividendListDto>;
   search?(keyword: string): Promise<FundSearchResultDto>;
+  screeningSnapshot?(options?: FundScreeningSnapshotOptions): Promise<FundScreeningSnapshotDto>;
   basic?(code: string): Promise<FundBasicDto>;
   holdings?(code: string): Promise<FundHoldingsDto>;
   managers?(code: string): Promise<FundManagersDto>;

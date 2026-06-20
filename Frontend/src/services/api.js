@@ -149,6 +149,11 @@ export const screeningAPI = {
   getStatus() {
     return api.get('/screening/status')
   },
+
+  // 获取更新进度（仅内存，极快）
+  getProgress() {
+    return api.get('/screening/progress')
+  },
   
   // 启动数据更新（直接获取完整数据）
   startUpdate(options = {}) {
@@ -180,6 +185,11 @@ export const screeningAPI = {
     return api.get(`/screening/fund/${fundCode}`)
   },
   
+  // 补全风险指标
+  fillRiskMetrics() {
+    return api.post('/screening/fill-risk')
+  },
+
   // 更新单只基金筛选数据
   updateSingleFund(fundCode) {
     return api.post(`/screening/update-single/${fundCode}`)

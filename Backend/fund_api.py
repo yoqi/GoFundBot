@@ -431,7 +431,7 @@ class FundAPI:
         
         try:
             import os
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            base_dir = os.path.dirname(os.path.abspath(__file__))
             cache_path = os.path.join(base_dir, 'Data', 'fund_list_cache.json')
             
             if os.path.exists(cache_path):

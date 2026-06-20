@@ -74,6 +74,7 @@ export const ttl = {
   fundDividends: 7 * 24 * 60 * 60 * 1000,
   fundSearch: 24 * 60 * 60 * 1000,
   fundBasic: 24 * 60 * 60 * 1000,
+  fundScreeningSnapshot: 30 * 60 * 1000,
   marketQuotes: 15 * 1000,
   marketKline: 60 * 60 * 1000,
   stockReference: 7 * 24 * 60 * 60 * 1000,

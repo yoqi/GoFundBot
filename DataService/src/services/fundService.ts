@@ -14,6 +14,7 @@ import type {
   FundManagersDto,
   FundNavHistoryDto,
   FundRankHistoryDto,
+  FundScreeningSnapshotDto,
   FundSearchResultDto,
 } from '../types/fund.js';
 import { EastMoneyFundProvider } from '../providers/eastmoney/eastmoneyFundProvider.js';
@@ -117,6 +118,28 @@ export async function getFundBasic(code: string): Promise<ServiceResult<FundBasi
         throw new AppError('PROVIDER_UNAVAILABLE', `${provider.name} does not implement fund basic`, 501);
       }
       return provider.basic(fundCode);
+    })
+  );
+
+  return toServiceResult(result);
+}
+
+export async function getFundScreeningSnapshot(options: {
+  types?: string[];
+  sort?: string;
+  pageSize?: number;
+}): Promise<ServiceResult<FundScreeningSnapshotDto>> {
+  const types = options.types?.filter(Boolean);
+  const sort = options.sort || '1nzf';
+  const pageSize = options.pageSize || 500;
+  const key = `fund:screening-snapshot:${(types || []).join(',')}:${sort}:${pageSize}`;
+  const chain = new ProviderChain<FundProvider>([eastMoneyFundProvider]);
+  const result = await cacheThrough(key, ttl.fundScreeningSnapshot, () =>
+    chain.run('fund.screeningSnapshot', (provider) => {
+      if (!provider.screeningSnapshot) {
+        throw new AppError('PROVIDER_UNAVAILABLE', `${provider.name} does not implement fund screening snapshot`, 501);
+      }
+      return provider.screeningSnapshot({ types, sort, pageSize });
     })
   );
 

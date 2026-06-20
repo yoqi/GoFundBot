@@ -204,7 +204,7 @@ class FundMasterService:
         return (9 * 60 + 30 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60)
 
     def _sector_rank_cache_file(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(root, "Data", "sector_rank_cache.json")
 
     def _save_sector_rank_file_cache(self, data):

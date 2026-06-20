@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, Text, DateTime, Integer
+from sqlalchemy import Column, String, Float, Text, DateTime, Integer, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 
@@ -196,6 +196,43 @@ class FundScreeningRank(Base):
 
 
 # ==================== 用户数据表 ====================
+
+class DataFetchTask(Base):
+    """Persistent progress for long-running data refresh jobs."""
+    __tablename__ = 'data_fetch_task'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_type = Column(String(50), nullable=False, index=True)
+    status = Column(String(20), default='running', index=True)
+    target_count = Column(Integer, default=0)
+    current_count = Column(Integer, default=0)
+    success_count = Column(Integer, default=0)
+    fail_count = Column(Integer, default=0)
+    current_item = Column(String(200))
+    message = Column(String(300))
+    options_json = Column(Text)
+    error_message = Column(Text)
+    started_time = Column(DateTime, default=datetime.now)
+    finished_time = Column(DateTime)
+    updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class FundNavHistory(Base):
+    """One row per fund and trade date, following ifund's local NAV cache model."""
+    __tablename__ = 'fund_nav_history'
+    __table_args__ = (
+        UniqueConstraint('fund_code', 'trade_date', name='uq_fund_nav_history_code_date'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fund_code = Column(String(6), nullable=False, index=True)
+    trade_date = Column(String(10), nullable=False, index=True)
+    nav = Column(Float)
+    acc_nav = Column(Float)
+    daily_return = Column(Float)
+    fetch_time = Column(DateTime, default=datetime.now)
+    updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 
 class FundWatchlistGroup(Base):
     """自选分组表"""

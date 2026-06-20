@@ -90,6 +90,20 @@ def proxy_fund_basic(code):
         return jsonify(e.to_payload()), e.status_code
 
 
+@data_service_bp.route('/funds/screening-snapshot', methods=['GET'])
+def proxy_fund_screening_snapshot():
+    """Proxy fund screening snapshot -> DataService /api/funds/screening-snapshot"""
+    types = request.args.get('types')
+    page_size = request.args.get('pageSize', 500, type=int)
+    sort = request.args.get('sort', '1nzf')
+    type_list = [item.strip() for item in types.split(',') if item.strip()] if types else None
+    try:
+        result = get_data_service_client().get_fund_screening_snapshot(type_list, page_size=page_size, sort=sort)
+        return jsonify(result)
+    except DataServiceError as e:
+        return jsonify(e.to_payload()), e.status_code
+
+
 @data_service_bp.route('/funds/<code>/nav-history', methods=['GET'])
 def proxy_fund_nav_history(code):
     """代理基金净值历史 → DataService /api/funds/:code/nav-history"""

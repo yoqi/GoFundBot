@@ -52,6 +52,23 @@
       <div v-else class="overview-grid empty-hint">暂未设置持仓</div>
     </div>
 
+    <!-- 挂起交易提示 -->
+    <div class="pending-txns-bar" v-if="pendingTxns.length">
+      <div class="pending-header" @click="showPending = !showPending">
+        <span>⏳ {{ pendingTxns.length }} 笔交易待结算（等待当日净值公布）</span>
+        <span class="pending-toggle">{{ showPending ? '收起 ▲' : '展开 ▼' }}</span>
+      </div>
+      <div class="pending-list" v-if="showPending">
+        <div class="pending-item" v-for="txn in pendingTxns" :key="txn.id">
+          <span class="p-type" :class="txn.type">{{ txn.type === 'buy' ? '买入' : '卖出' }}</span>
+          <span class="p-name">{{ txn.fundName }}</span>
+          <span class="p-val">{{ txn.type === 'buy' ? '¥' + txn.inputValue.toFixed(2) : txn.inputValue.toFixed(2) + ' 份' }}</span>
+          <span class="p-date">交易日 {{ txn.tradeDate }}</span>
+          <button class="btn-cancel-txn" @click="cancelPendingTxn(txn.id)">取消</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Tabs -->
     <div class="content-tabs">
       <div class="ctab" :class="{active: activeTab==='all'}" @click="activeTab='all'">
@@ -314,35 +331,40 @@
           </div>
 
           <div class="form-group elegant-input-group">
-            <label>交易净值</label>
-            <div class="input-wrapper">
-              <span class="prefix">¥</span>
-              <input
-                v-model.number="tradeForm.nav"
-                type="number"
-                step="any"
-                placeholder="默认使用上一交易日净值"
-                class="modal-input no-border"
-              />
+            <label>交易日期</label>
+            <div class="input-wrapper date-wrapper">
+              <input v-model="tradeForm.tradeDate" type="date" class="modal-input no-border" :max="todayDate" />
             </div>
           </div>
 
+          <div class="trade-nav-derived" v-if="getTradeNav() > 0">
+            <span>参考净值：¥{{ getTradeNav().toFixed(4) }}</span>
+            <span class="nav-date-hint" v-if="tradeForm.tradeDate === todayDate && !hasExactNavForDate(holdingModal.fund, todayDate)">⚠️ 当日净值未公布，交易将挂起</span>
+            <span class="nav-date-hint confirmed" v-else-if="tradeForm.tradeDate === todayDate && hasExactNavForDate(holdingModal.fund, todayDate)">✓ 当日净值已公布</span>
+          </div>
+
           <div class="form-group elegant-input-group">
-            <label>{{ tradeForm.type === 'buy' ? '加仓金额' : '减仓金额' }}</label>
+            <label>{{ tradeForm.type === 'buy' ? '加仓金额' : '减仓份额' }}</label>
             <div class="input-wrapper">
-              <span class="prefix">¥</span>
+              <span class="prefix">{{ tradeForm.type === 'buy' ? '¥' : '📦' }}</span>
               <input
-                v-model.number="tradeForm.amount"
+                v-model.number="tradeForm.inputValue"
                 type="number"
                 step="any"
-                :placeholder="tradeForm.type === 'buy' ? '请输入加仓金额' : '请输入减仓金额'"
+                :placeholder="tradeForm.type === 'buy' ? '请输入加仓金额' : '请输入减仓份额'"
                 class="modal-input no-border highlight"
               />
             </div>
-            <div class="trade-inline-hint" v-if="tradeForm.amount && getTradeNav() > 0">
-              <span>折算份额 {{ (tradeForm.amount / getTradeNav()).toFixed(2) }} 份</span>
-              <span>交易后总份额 {{ getTradeResultShares().toFixed(2) }} 份</span>
-              <span class="warning" v-if="getTradeResultShares() < 0">份额不足</span>
+            <div class="trade-inline-hint" v-if="tradeForm.inputValue && getTradeNav() > 0">
+              <template v-if="tradeForm.type === 'buy'">
+                <span>折算份额 {{ (tradeForm.inputValue / getTradeNav()).toFixed(2) }} 份</span>
+                <span>交易后总份额 {{ getTradeResultShares().toFixed(2) }} 份</span>
+              </template>
+              <template v-else>
+                <span>预计到账 ¥{{ (tradeForm.inputValue * getTradeNav()).toFixed(2) }}</span>
+                <span>交易后剩余份额 {{ getTradeResultShares().toFixed(2) }} 份</span>
+                <span class="warning" v-if="getTradeResultShares() < 0">份额不足</span>
+              </template>
             </div>
           </div>
 
@@ -352,9 +374,9 @@
               class="elegant-btn-confirm"
               :class="tradeForm.type"
               @click="saveTrade"
-              :disabled="!tradeForm.amount || tradeForm.amount <= 0 || getTradeResultShares() < 0"
+              :disabled="!canSubmitTrade()"
             >
-              确认{{ tradeForm.type === 'buy' ? '加仓' : '减仓' }}
+              {{ submitButtonText() }}
             </button>
           </div>
         </div>
@@ -397,7 +419,9 @@ export default {
     const holdingModal = ref({ open: false, fund: null })
     const holdingForm = ref({ amount: '', buyDate: todayDate.value })
     const modalTab = ref('set')
-    const tradeForm = ref({ type: 'buy', amount: '', nav: '' })
+    const tradeForm = ref({ type: 'buy', inputValue: '', tradeDate: todayDate.value })
+    const pendingTxns = ref([])   // 挂起交易列表
+    const showPending = ref(false)
 
     // ==================== 计算属性 ====================
     const isTradingTime = computed(() => {
@@ -750,7 +774,14 @@ export default {
     }
 
     const getFundTrendSeries = (fund) => {
-      // 估值卡片中的净值换算与迷你走势图统一使用净值走势，避免收益曲线导致形态异常
+      // 优先使用累计收益率走势（含分红再投资，与收益率口径一致）
+      if (Array.isArray(fund?.totalReturnTrend) && fund.totalReturnTrend.length > 0) {
+        return fund.totalReturnTrend
+          .map(parseTrendPoint)
+          .filter(Boolean)
+          .sort((a, b) => a.date.localeCompare(b.date))
+      }
+      // 回退到单位净值走势
       if (!Array.isArray(fund?.netWorthTrend)) return []
       return fund.netWorthTrend
         .map(parseTrendPoint)
@@ -773,6 +804,23 @@ export default {
         }
       }
       return matched?.nav || parseFloat(fund?.dwjz) || trend[trend.length - 1].nav || 0
+    }
+
+    // 判断净值走势中是否有精确匹配 dateStr 的净值数据点
+    const hasExactNavForDate = (fund, dateStr) => {
+      const trend = getFundTrendSeries(fund)
+      if (!trend.length) return false
+      const target = String(dateStr || '').slice(0, 10)
+      if (!target) return false
+      return trend.some(p => p.date === target)
+    }
+
+    // 判断交易是否应挂起（当日净值尚未公布）
+    const isTradeDatePending = (fund, tradeDate) => {
+      if (!fund || !tradeDate) return false
+      const today = new Date().toISOString().slice(0, 10)
+      if (tradeDate !== today) return false
+      return !hasExactNavForDate(fund, tradeDate)
     }
 
     const getFundSparklinePoints = (fund) => {
@@ -1084,6 +1132,9 @@ export default {
         
         funds.value = updated
         localStorage.setItem('realtime_funds', JSON.stringify(updated))
+
+        // 检查挂起交易是否可以结算
+        settlePendingTxnsIfReady()
       } catch (e) {
         console.error('刷新失败', e)
       } finally {
@@ -1117,7 +1168,7 @@ export default {
       }
       // 重置加减仓表单
       modalTab.value = h && h.share ? 'trade' : 'set'
-      tradeForm.value = { type: 'buy', amount: '', nav: '' }
+      tradeForm.value = { type: 'buy', inputValue: '', tradeDate: todayDate.value }
     }
 
     const openTradeModal = (fund, type) => {
@@ -1168,62 +1219,160 @@ export default {
       closeHoldingModal()
     }
 
-    // 获取交易净值（优先使用用户输入，否则使用上一交易日净值）
+    // 获取交易净值（根据所选交易日期从净值走势中查找）
     const getTradeNav = () => {
-      const inputNav = parseFloat(tradeForm.value.nav)
-      if (inputNav > 0) return inputNav
-      return parseFloat(holdingModal.value.fund?.dwjz) || 0
+      const fund = holdingModal.value.fund
+      if (!fund) return 0
+      const date = tradeForm.value.tradeDate
+      if (!date) return 0
+      return getFundNavByDate(fund, date)
     }
 
     // 计算交易后总份额
     const getTradeResultShares = () => {
       const nav = getTradeNav()
-      const amount = parseFloat(tradeForm.value.amount) || 0
-      if (nav <= 0 || amount <= 0) return holdings.value[holdingModal.value.fund?.code]?.share || 0
-      const tradeShares = amount / nav
+      const inputValue = parseFloat(tradeForm.value.inputValue) || 0
+      if (nav <= 0 || inputValue <= 0) return holdings.value[holdingModal.value.fund?.code]?.share || 0
       const currentShares = holdings.value[holdingModal.value.fund?.code]?.share || 0
-      return tradeForm.value.type === 'buy' ? currentShares + tradeShares : currentShares - tradeShares
-    }
-
-    // 保存加减仓交易
-    const saveTrade = () => {
-      const fund = holdingModal.value.fund
-      if (!fund) return
-
-      const amount = parseFloat(tradeForm.value.amount)
-      const nav = getTradeNav()
-      if (!amount || amount <= 0 || nav <= 0) return
-
-      const tradeShares = amount / nav
-      const h = holdings.value[fund.code] || { share: 0, cost: 0 }
-      const newHoldings = { ...holdings.value }
 
       if (tradeForm.value.type === 'buy') {
-        // 加仓：计算新的总份额和加权平均成本
+        // 买入：金额 / 净值 = 所得份额
+        const tradeShares = inputValue / nav
+        return currentShares + tradeShares
+      } else {
+        // 卖出：直接扣除份额
+        return currentShares - inputValue
+      }
+    }
+
+    // 判断是否可以提交交易
+    const canSubmitTrade = () => {
+      const inputValue = parseFloat(tradeForm.value.inputValue)
+      if (!inputValue || inputValue <= 0) return false
+      if (getTradeNav() <= 0) return false
+      if (getTradeResultShares() < 0) return false
+      return true
+    }
+
+    // 提交按钮文字
+    const submitButtonText = () => {
+      const fund = holdingModal.value.fund
+      const pending = isTradeDatePending(fund, tradeForm.value.tradeDate)
+      const base = tradeForm.value.type === 'buy' ? '加仓' : '减仓'
+      return pending ? `确认${base}并挂起` : `确认${base}`
+    }
+
+    // 结算一笔交易（直接更新持仓）
+    const settleTrade = (fund, type, inputValue, nav, tradeDate) => {
+      const newHoldings = { ...holdings.value }
+      const h = newHoldings[fund.code] || { share: 0, cost: 0, buy_date: '' }
+
+      if (type === 'buy') {
+        const tradeShares = inputValue / nav
         const newTotalShares = h.share + tradeShares
         const newAvgCost = h.share > 0
-          ? (h.share * h.cost + amount) / newTotalShares
+          ? (h.share * h.cost + inputValue) / newTotalShares
           : nav
         newHoldings[fund.code] = {
           share: newTotalShares,
-          cost: newAvgCost
+          cost: newAvgCost,
+          buy_date: h.buy_date || tradeDate || tradeForm.value.tradeDate
         }
       } else {
-        // 减仓：份额减少，成本价不变
-        const newTotalShares = h.share - tradeShares
+        // 卖出：inputValue 是份额
+        const newTotalShares = h.share - inputValue
         if (newTotalShares <= 0.01) {
           delete newHoldings[fund.code]
         } else {
           newHoldings[fund.code] = {
             share: newTotalShares,
-            cost: h.cost
+            cost: h.cost,
+            buy_date: h.buy_date
           }
         }
       }
 
       holdings.value = newHoldings
       localStorage.setItem('realtime_holdings', JSON.stringify(newHoldings))
+    }
+
+    // 生成唯一 ID
+    const genTxnId = () => {
+      return 'txn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+    }
+
+    // 保存加减仓交易
+    const saveTrade = () => {
+      const fund = holdingModal.value.fund
+      if (!fund || !canSubmitTrade()) return
+
+      const inputValue = parseFloat(tradeForm.value.inputValue)
+      const nav = getTradeNav()
+      const tradeDate = tradeForm.value.tradeDate
+      const type = tradeForm.value.type
+
+      // 判断是否挂起
+      if (isTradeDatePending(fund, tradeDate)) {
+        // 挂起交易
+        const txn = {
+          id: genTxnId(),
+          fundCode: fund.code,
+          fundName: fund.name || fund.code,
+          type,
+          tradeDate,
+          inputValue,
+          createdAt: new Date().toISOString()
+        }
+        pendingTxns.value.push(txn)
+        localStorage.setItem('realtime_pending_txns', JSON.stringify(pendingTxns.value))
+        closeHoldingModal()
+        return
+      }
+
+      // 不挂起，直接结算
+      settleTrade(fund, type, inputValue, nav, tradeDate)
       closeHoldingModal()
+    }
+
+    // 取消挂起交易
+    const cancelPendingTxn = (txnId) => {
+      pendingTxns.value = pendingTxns.value.filter(t => t.id !== txnId)
+      localStorage.setItem('realtime_pending_txns', JSON.stringify(pendingTxns.value))
+    }
+
+    // 检查并结算已就绪的挂起交易
+    const settlePendingTxnsIfReady = () => {
+      if (!pendingTxns.value.length) return
+
+      const remaining = []
+      let changed = false
+
+      for (const txn of pendingTxns.value) {
+        // 在 funds 列表中找到对应基金
+        const fund = funds.value.find(f => f.code === txn.fundCode)
+        if (!fund) {
+          // 基金已被删除，保留挂起以便用户手动取消
+          remaining.push(txn)
+          continue
+        }
+
+        // 检查该交易日净值是否已公布
+        if (hasExactNavForDate(fund, txn.tradeDate)) {
+          const nav = getFundNavByDate(fund, txn.tradeDate)
+          if (nav > 0) {
+            settleTrade(fund, txn.type, txn.inputValue, nav, txn.tradeDate)
+            changed = true
+            continue  // 已结算，不加入 remaining
+          }
+        }
+
+        remaining.push(txn)
+      }
+
+      if (changed) {
+        pendingTxns.value = remaining
+        localStorage.setItem('realtime_pending_txns', JSON.stringify(remaining))
+      }
     }
 
     const saveRefreshMs = () => {
@@ -1245,6 +1394,7 @@ export default {
       const payload = {
         funds: funds.value,
         holdings: holdings.value,
+        pendingTxns: pendingTxns.value,
         exportedAt: new Date().toISOString()
       }
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
@@ -1271,6 +1421,10 @@ export default {
         if (parsed.holdings && typeof parsed.holdings === 'object') {
           holdings.value = parsed.holdings
           localStorage.setItem('realtime_holdings', JSON.stringify(parsed.holdings))
+        }
+        if (Array.isArray(parsed.pendingTxns)) {
+          pendingTxns.value = parsed.pendingTxns
+          localStorage.setItem('realtime_pending_txns', JSON.stringify(parsed.pendingTxns))
         }
         refreshAll()
       } catch (error) {
@@ -1317,6 +1471,11 @@ export default {
         const savedCollapsed = JSON.parse(localStorage.getItem('realtime_collapsed') || '[]')
         if (Array.isArray(savedCollapsed)) {
           collapsedCodes.value = new Set(savedCollapsed)
+        }
+
+        const savedPending = JSON.parse(localStorage.getItem('realtime_pending_txns') || '[]')
+        if (Array.isArray(savedPending)) {
+          pendingTxns.value = savedPending
         }
       } catch (e) {
         console.error('加载本地数据失败', e)
@@ -1422,7 +1581,14 @@ export default {
       calculateShare,
       getTradeNav,
       getTradeResultShares,
-      saveTrade
+      saveTrade,
+      pendingTxns,
+      showPending,
+      hasExactNavForDate,
+      canSubmitTrade,
+      submitButtonText,
+      cancelPendingTxn,
+      settlePendingTxnsIfReady
     }
   }
 }
@@ -1955,5 +2121,125 @@ export default {
 .trade-inline-hint .warning {
   color: #f5222d;
   font-weight: 600;
+}
+
+/* 交易日期衍生的净值展示 */
+.trade-nav-derived {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f0f5ff;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #1677ff;
+  font-weight: 600;
+}
+
+.nav-date-hint {
+  color: #fa8c16;
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.nav-date-hint.confirmed {
+  color: #52c41a;
+}
+
+/* 挂起交易提示栏 */
+.pending-txns-bar {
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.pending-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ad6800;
+  user-select: none;
+}
+
+.pending-header:hover {
+  background: #fff7cc;
+}
+
+.pending-toggle {
+  font-size: 12px;
+  color: #ad6800;
+  font-weight: 500;
+}
+
+.pending-list {
+  border-top: 1px solid #ffe58f;
+}
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  font-size: 13px;
+  border-bottom: 1px solid #fff3cc;
+}
+
+.pending-item:last-child {
+  border-bottom: none;
+}
+
+.p-type {
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.p-type.buy {
+  background: #f6ffed;
+  color: #52c41a;
+}
+
+.p-type.sell {
+  background: #fff1f0;
+  color: #f5222d;
+}
+
+.p-name {
+  flex: 1;
+  color: #333;
+}
+
+.p-val {
+  color: #1677ff;
+  font-weight: 600;
+}
+
+.p-date {
+  color: #999;
+  font-size: 12px;
+}
+
+.btn-cancel-txn {
+  padding: 4px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  color: #999;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.btn-cancel-txn:hover {
+  border-color: #f5222d;
+  color: #f5222d;
 }
 </style>

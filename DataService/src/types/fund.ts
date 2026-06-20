@@ -97,6 +97,39 @@ export interface FundSearchResultDto {
   items: FundSearchItemDto[];
 }
 
+export interface FundScreeningSnapshotItemDto {
+  code: string;
+  name: string;
+  type: string | null;
+  nav: number | null;
+  navDate: string | null;
+  return1m: number | null;
+  return3m: number | null;
+  return6m: number | null;
+  return1y: number | null;
+  return2y: number | null;
+  return3y: number | null;
+  ytd: number | null;
+  sinceInception: number | null;
+  fee: string | null;
+  source: string;
+  updatedAt: string;
+}
+
+export interface FundScreeningSnapshotDto {
+  items: FundScreeningSnapshotItemDto[];
+  failedPages: Array<{
+    type: string;
+    page: number;
+    error: string;
+  }>;
+  summary: {
+    total: number;
+    types: string[];
+    pageSize: number;
+  };
+}
+
 export interface FundBasicDto {
   code: string;
   name: string | null;

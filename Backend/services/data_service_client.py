@@ -95,6 +95,20 @@ class DataServiceClient:
     def get_fund_basic(self, code: str) -> Dict[str, Any]:
         return self._get(f"/funds/{code}/basic")
 
+    def get_fund_screening_snapshot(
+        self,
+        types: Optional[Iterable[str]] = None,
+        page_size: int = 500,
+        sort: str = "1nzf",
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "pageSize": str(page_size),
+            "sort": sort,
+        }
+        if types:
+            params["types"] = ",".join(str(item) for item in types if str(item).strip())
+        return self._get("/funds/screening-snapshot", params=params, timeout=20.0)
+
     # ------------------------------------------------------------------
     # Fund – detail (aggregated)
     # ------------------------------------------------------------------

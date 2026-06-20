@@ -12,10 +12,25 @@ import {
   getFundManagers,
   getFundNavHistory,
   getFundRankHistory,
+  getFundScreeningSnapshot,
   searchFunds,
 } from '../services/fundService.js';
 
 export const fundRouter = Router();
+
+fundRouter.get(
+  '/screening-snapshot',
+  asyncHandler(async (req, res) => {
+    sendSuccess(
+      res,
+      await getFundScreeningSnapshot({
+        types: parseCsvQuery(req.query.types),
+        sort: firstQueryValue(req.query.sort),
+        pageSize: parseIntQuery(req.query.pageSize),
+      })
+    );
+  })
+);
 
 fundRouter.get(
   '/search',
@@ -109,4 +124,21 @@ function firstQueryValue(value: unknown): string | undefined {
     return typeof value[0] === 'string' ? value[0] : undefined;
   }
   return typeof value === 'string' ? value : undefined;
+}
+
+function parseCsvQuery(value: unknown): string[] | undefined {
+  const raw = firstQueryValue(value);
+  if (!raw) {
+    return undefined;
+  }
+  return raw.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function parseIntQuery(value: unknown): number | undefined {
+  const raw = firstQueryValue(value);
+  if (!raw) {
+    return undefined;
+  }
+  const num = Number(raw);
+  return Number.isFinite(num) ? Math.floor(num) : undefined;
 }

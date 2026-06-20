@@ -15,12 +15,14 @@ import type {
   FundPositionTrendItemDto,
   FundRankHistoryDto,
   FundScaleFluctuationDto,
+  FundScreeningSnapshotDto,
+  FundScreeningSnapshotItemDto,
   FundSearchResultDto,
   FundSubscriptionRedemptionDto,
   FundTotalReturnTrendDto,
 } from '../../types/fund.js';
 import { AppError } from '../../core/errors.js';
-import type { FundNavHistoryOptions, FundProvider } from '../types.js';
+import type { FundNavHistoryOptions, FundProvider, FundScreeningSnapshotOptions } from '../types.js';
 import { fetchText, parseJsonpObject, parseJsJson, parseJsString, extractJsAssignment } from './eastmoneyRequest.js';
 
 interface EastMoneyNavPoint {
@@ -31,6 +33,17 @@ interface EastMoneyNavPoint {
 }
 
 type EastMoneyAccNavPoint = [number, number];
+
+const SCREENING_TYPE_MAP: Record<string, string> = {
+  all: '',
+  gp: 'gp',
+  hh: 'hh',
+  zq: 'zq',
+  zs: 'zs',
+  qdii: 'qdii',
+  lof: 'lof',
+  fof: 'fof',
+};
 
 export class EastMoneyFundProvider implements FundProvider {
   readonly name = 'eastmoney';
@@ -153,6 +166,63 @@ export class EastMoneyFundProvider implements FundProvider {
       currentRate,
       minSubscriptionAmount: minSubAmount,
       isHB: isHB,
+    };
+  }
+
+  async screeningSnapshot(options: FundScreeningSnapshotOptions = {}): Promise<FundScreeningSnapshotDto> {
+    const types = normalizeScreeningTypes(options.types);
+    const pageSize = normalizePageSize(options.pageSize);
+    const sort = options.sort || '1nzf';
+    const seen = new Set<string>();
+    const items: FundScreeningSnapshotItemDto[] = [];
+    const failedPages: FundScreeningSnapshotDto['failedPages'] = [];
+
+    for (const type of types) {
+      let firstPage: FundRankingPage | null = null;
+      try {
+        firstPage = await fetchFundRankingPage(type, 1, pageSize, sort);
+        appendUniqueFundItems(firstPage.items, seen, items);
+      } catch (error) {
+        failedPages.push({
+          type,
+          page: 1,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      if (!firstPage) {
+        continue;
+      }
+
+      const totalPages = Math.max(1, Math.ceil(firstPage.total / pageSize));
+      const pages = Array.from({ length: Math.max(0, totalPages - 1) }, (_, idx) => idx + 2);
+      for (const pageBatch of chunkArray(pages, 4)) {
+        const results = await Promise.allSettled(
+          pageBatch.map((page) => fetchFundRankingPage(type, page, pageSize, sort))
+        );
+        results.forEach((result, idx) => {
+          const page = pageBatch[idx];
+          if (result.status === 'fulfilled') {
+            appendUniqueFundItems(result.value.items, seen, items);
+          } else {
+            failedPages.push({
+              type,
+              page,
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            });
+          }
+        });
+      }
+    }
+
+    return {
+      items,
+      failedPages,
+      summary: {
+        total: items.length,
+        types,
+        pageSize,
+      },
     };
   }
 
@@ -574,6 +644,138 @@ function latestScaleValue(scale: Record<string, unknown>): string | null {
   }
 
   return toNullableString((last as Record<string, unknown>).y);
+}
+
+interface FundRankingPage {
+  total: number;
+  items: FundScreeningSnapshotItemDto[];
+}
+
+function appendUniqueFundItems(
+  nextItems: FundScreeningSnapshotItemDto[],
+  seen: Set<string>,
+  target: FundScreeningSnapshotItemDto[]
+): void {
+  for (const item of nextItems) {
+    if (!seen.has(item.code)) {
+      seen.add(item.code);
+      target.push(item);
+    }
+  }
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function normalizeScreeningTypes(types: string[] | undefined): string[] {
+  const raw = types && types.length > 0 ? types : ['gp', 'hh', 'zq', 'zs', 'qdii', 'fof'];
+  const result: string[] = [];
+  for (const type of raw) {
+    const normalized = String(type || '').trim().toLowerCase();
+    if (normalized in SCREENING_TYPE_MAP && !result.includes(normalized)) {
+      result.push(normalized);
+    }
+  }
+  return result.length > 0 ? result : ['gp', 'hh', 'zq', 'zs', 'qdii', 'fof'];
+}
+
+function normalizePageSize(value: number | undefined): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return 500;
+  }
+  return Math.min(Math.max(Math.floor(num), 50), 1000);
+}
+
+async function fetchFundRankingPage(
+  fundType: string,
+  page: number,
+  pageSize: number,
+  sort: string
+): Promise<FundRankingPage> {
+  const params = new URLSearchParams({
+    op: 'ph',
+    dt: 'kf',
+    ft: SCREENING_TYPE_MAP[fundType] ?? '',
+    rs: '',
+    gs: '0',
+    sc: sort,
+    st: 'desc',
+    sd: '',
+    ed: '',
+    qdii: '',
+    tabSubtype: ',,,,,',
+    pi: String(page),
+    pn: String(pageSize),
+    dx: '1',
+    v: compactTimestamp(new Date()),
+  });
+
+  const text = await fetchText(`https://fund.eastmoney.com/data/rankhandler.aspx?${params.toString()}`, 30000);
+  const match = text.match(/var\s+rankData\s*=\s*(\{[\s\S]*?\});/);
+  if (!match) {
+    throw new AppError('PROVIDER_UNAVAILABLE', 'EastMoney fund ranking payload did not contain rankData', 502);
+  }
+
+  const data = JSON.parse(match[1].replace(/(\w+)\s*:/g, '"$1":').replaceAll("'", '"')) as {
+    datas?: string[];
+    allRecords?: number;
+  };
+
+  const updatedAt = new Date().toISOString();
+  const rows = Array.isArray(data.datas) ? data.datas : [];
+  return {
+    total: Number(data.allRecords) || rows.length,
+    items: rows.map((row) => mapRankingRow(row, updatedAt)).filter((item): item is FundScreeningSnapshotItemDto => Boolean(item)),
+  };
+}
+
+function mapRankingRow(row: string, updatedAt: string): FundScreeningSnapshotItemDto | null {
+  const parts = String(row).split(',');
+  if (parts.length < 16) {
+    return null;
+  }
+
+  return {
+    code: parts[0].padStart(6, '0'),
+    name: parts[1] || '',
+    type: null,
+    navDate: emptyToNull(parts[3]),
+    nav: parseRankingNumber(parts[4]),
+    return1m: parseRankingNumber(parts[8]),
+    return3m: parseRankingNumber(parts[9]),
+    return6m: parseRankingNumber(parts[10]),
+    return1y: parseRankingNumber(parts[11]),
+    return2y: parseRankingNumber(parts[12]),
+    return3y: parseRankingNumber(parts[13]),
+    ytd: parseRankingNumber(parts[14]),
+    sinceInception: parseRankingNumber(parts[15]),
+    fee: emptyToNull(parts[16]),
+    source: 'eastmoney.rankhandler',
+    updatedAt,
+  };
+}
+
+function parseRankingNumber(value: string | undefined): number | null {
+  if (value == null || value === '' || value === '--' || value === '-') {
+    return null;
+  }
+  const num = Number(String(value).replace('%', ''));
+  return Number.isFinite(num) ? num : null;
+}
+
+function emptyToNull(value: string | undefined): string | null {
+  return value == null || value === '' || value === '--' || value === '-' ? null : value;
+}
+
+function compactTimestamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function filterNavHistory(data: FundNavHistoryDto, range: FundNavHistoryOptions): FundNavHistoryDto {

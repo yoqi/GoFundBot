@@ -29,7 +29,7 @@ class StockService:
         self.last_update = 0
         self.cache_ttl = 24 * 3600 * 10  # 10 days
         self.cache_file = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "Data", "stock_list_cache.json")
+            os.path.join(os.path.dirname(__file__), "Data", "stock_list_cache.json")
         )
         self._load_data()
         self._initialized = True
