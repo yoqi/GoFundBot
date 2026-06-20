@@ -252,13 +252,37 @@ class MarketDataService:
         end_date: str = "",
         use_cache: bool = True,
     ) -> Dict[str, Any]:
-        """获取 A 股 K 线"""
+        """获取 A 股 K 线（腾讯 → 东方财富 → akshare 兜底）"""
         cache_key = f"kline_{stock_code}_{klt}_{fqt}_{start_date}_{end_date}"
         if use_cache:
             cached = self._cache_get(cache_key)
             if cached:
                 return cached
 
+        # 1) 腾讯财经（主要数据源）
+        try:
+            klines = tx.get_kline(
+                stock_code,
+                period=klt,
+                adjust=fqt,
+                start_date=_to_date_dash(start_date),
+                end_date=_to_date_dash(end_date),
+            )
+            if klines:
+                result = {
+                    "success": True,
+                    "data": klines,
+                    "total_count": len(klines),
+                    "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "source": "tencent",
+                }
+                self._cache_set(cache_key, result, "a_stock_kline")
+                return result
+            logger.warning(f"[MarketData] 腾讯 K线 {stock_code} 返回空数据，尝试东方财富")
+        except Exception as exc:
+            logger.warning(f"[MarketData] 腾讯 K线 {stock_code} 失败: {exc}，尝试东方财富")
+
+        # 2) 东方财富
         try:
             klines = em.get_a_stock_kline(
                 stock_code,
@@ -272,12 +296,106 @@ class MarketDataService:
                 "data": klines,
                 "total_count": len(klines),
                 "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source": "eastmoney",
             }
             self._cache_set(cache_key, result, "a_stock_kline")
             return result
         except MarketDataError as exc:
-            logger.warning(f"[MarketData] K 线 {stock_code} 失败: {exc}")
-            return {"success": False, "data": [], "error": str(exc)}
+            logger.warning(f"[MarketData] EastMoney K线 {stock_code} 失败: {exc}")
+
+        # 3) akshare 兜底
+        if not _akshare_disabled():
+            try:
+                klines = self._get_kline_akshare(
+                    stock_code,
+                    klt=klt,
+                    fqt=fqt,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if klines:
+                    result = {
+                        "success": True,
+                        "data": klines,
+                        "total_count": len(klines),
+                        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "source": "akshare",
+                    }
+                    self._cache_set(cache_key, result, "a_stock_kline")
+                    return result
+                logger.warning(f"[MarketData] akshare K线 {stock_code} 返回空数据")
+            except Exception as exc:
+                logger.warning(f"[MarketData] akshare K线 {stock_code} 也失败: {exc}")
+
+        return {"success": False, "data": [], "error": "所有数据源（腾讯/东方财富/akshare）均不可用"}
+
+    def _get_kline_akshare(
+        self,
+        stock_code: str,
+        *,
+        klt: str = "daily",
+        fqt: str = "qfq",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> List[Dict[str, Any]]:
+        """通过 akshare 获取 A 股历史日 K 线（仅支持日线前复权）"""
+        import akshare as ak
+
+        # akshare 仅支持日线
+        if klt not in ("daily", ""):
+            logger.warning(f"[MarketData] akshare 仅支持日线，收到 {klt}，降级为 daily")
+            klt = "daily"
+
+        # akshare 复权参数映射
+        akshare_adjust = ""
+        if fqt == "qfq":
+            akshare_adjust = "qfq"
+        elif fqt == "hfq":
+            akshare_adjust = "hfq"
+
+        df = ak.stock_zh_a_hist(
+            symbol=stock_code,
+            period=klt,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=akshare_adjust,
+        )
+
+        if df is None or df.empty:
+            return []
+
+        # DataFrame 列名映射（中文 → 英文）
+        COLUMN_MAP = {
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+            "振幅": "amplitude",
+            "涨跌幅": "changePercent",
+            "涨跌额": "change",
+            "换手率": "turnoverRate",
+        }
+
+        result: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            item: Dict[str, Any] = {}
+            for cn_col, en_col in COLUMN_MAP.items():
+                if cn_col in df.columns:
+                    val = row[cn_col]
+                    if en_col == "date":
+                        # akshare 返回的日期可能是 datetime / str "YYYY-MM-DD" → 统一 "YYYYMMDD"
+                        item[en_col] = _format_kline_date(val)
+                    elif en_col in ("volume", "amount"):
+                        item[en_col] = str(val) if val is not None else "0"
+                    else:
+                        item[en_col] = _safe_float_str(val)
+            if item.get("date"):
+                result.append(item)
+
+        return result
 
     # ── 腾讯实时行情 ───────────────────────────────────────────
 
@@ -509,3 +627,38 @@ def _safe_float(val, default=0.0):
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def _safe_float_str(val, default: str = "0.00") -> str:
+    """将值安全转为浮点数字符串（保留两位小数）"""
+    try:
+        if val in (None, "", "-", "--"):
+            return default
+        return f"{float(val):.2f}"
+    except (ValueError, TypeError):
+        return default
+
+
+def _format_kline_date(val) -> str:
+    """将 akshare 返回的日期转为 YYYYMMDD 字符串"""
+    from datetime import date as dt_date, datetime as dt_datetime
+    if isinstance(val, dt_datetime) or isinstance(val, dt_date):
+        return val.strftime("%Y%m%d")
+    s = str(val).strip()
+    # YYYY-MM-DD → YYYYMMDD
+    if "-" in s:
+        return s.replace("-", "")
+    # 已经是 YYYYMMDD 格式
+    if s.isdigit() and len(s) == 8:
+        return s
+    return s
+
+
+def _to_date_dash(date_str: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD（腾讯接口需要），空字符串保持空字符串"""
+    if not date_str:
+        return ""
+    s = str(date_str).strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s

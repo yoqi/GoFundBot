@@ -80,7 +80,7 @@
             @clear-funds="handleClearCompare"
           />
           <!-- 基金详情（选中时显示） -->
-          <FundDetail v-else-if="selectedFundCode && !compareMode" :fundCode="selectedFundCode" />
+          <FundDetail v-else-if="selectedFundCode && !compareMode" :fundCode="selectedFundCode" @navigate-to-fund="handleFundSelected" />
           <!-- 市场指数 + 金价 -->
           <MarketOverview 
             v-else
@@ -135,7 +135,7 @@
           <!-- 详情模式 -->
           <template v-else>
             <FundSearch @fund-selected="handleFundSelected" />
-            <FundDetail v-if="selectedFundCode" :fundCode="selectedFundCode" />
+            <FundDetail v-if="selectedFundCode" :fundCode="selectedFundCode" @navigate-to-fund="handleFundSelected" />
             <div v-else class="welcome-container">
               <div class="welcome-icon">🔍</div>
               <h3>搜索基金开始分析</h3>

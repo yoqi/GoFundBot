@@ -74,6 +74,7 @@
         <div class="card card-sidebar clickable" @click="openModal('portfolio')">
           <FundPortfolio
             :portfolio="fundDetail.portfolio"
+            @stock-click="handleStockClick"
           />
         </div>
         <div class="card card-sidebar clickable" @click="openModal('manager')">
@@ -89,6 +90,7 @@
         <div class="card card-sidebar clickable" @click="openModal('sametype')">
           <FundSameType
             :sameTypeFunds="fundDetail.same_type_funds"
+            @fund-select="handleSameTypeFundSelect"
           />
         </div>
       </div>
@@ -120,6 +122,7 @@
           <FundPortfolio
             v-if="modalType === 'portfolio'"
             :portfolio="fundDetail.portfolio"
+            @stock-click="handleStockClick"
           />
           <FundManagerInfo
             v-if="modalType === 'manager'"
@@ -137,11 +140,26 @@
             v-if="modalType === 'sametype'"
             :sameTypeFunds="fundDetail.same_type_funds"
             :isExpanded="true"
+            @fund-select="handleSameTypeFundSelect"
           />
         </div>
       </div>
     </div>
-    
+
+    <!-- 个股详情弹窗 -->
+    <div v-if="stockModalVisible" class="modal-overlay" @click.self="closeStockModal">
+      <div class="modal-content stock-modal-content">
+        <button class="modal-close" @click="closeStockModal">×</button>
+        <div class="modal-body">
+          <StockPopup
+            :stockData="stockQuoteData"
+            :loading="stockQuoteLoading"
+            :error="stockQuoteError"
+          />
+        </div>
+      </div>
+    </div>
+
     <!-- 加载状态 -->
     <div v-else-if="loading" class="loading">
       <div class="loading-spinner"></div>
@@ -177,10 +195,12 @@ import FundAbilityEval from './FundAbilityEval.vue'
 import FundSubscription from './FundSubscription.vue'
 import FundSameType from './FundSameType.vue'
 import FundAIAnalysis from './FundAIAnalysis.vue'
-import { fundAPI } from '../services/api'
+import StockPopup from './StockPopup.vue'
+import { fundAPI, marketAPI } from '../services/api'
 
 export default {
   name: 'FundDetail',
+  emits: ['navigate-to-fund'],
   components: {
     FundBasicInfo,
     FundChart,
@@ -193,7 +213,8 @@ export default {
     FundAbilityEval,
     FundSubscription,
     FundSameType,
-    FundAIAnalysis
+    FundAIAnalysis,
+    StockPopup
   },
   props: {
     fundCode: {
@@ -201,7 +222,7 @@ export default {
       default: ''
     }
   },
-  setup(props) {
+  setup(props, { emit }) {
     const currentFundCode = ref(props.fundCode)
     const fundDetail = ref(null)
     const loading = ref(false)
@@ -211,6 +232,54 @@ export default {
     const fundAIAnalysisRef = ref(null)
     const showAIAnalysis = ref(false)
     const aiAnalysisData = ref(null)
+
+    // 个股详情弹窗状态
+    const stockModalVisible = ref(false)
+    const stockQuoteLoading = ref(false)
+    const stockQuoteData = ref(null)
+    const stockQuoteError = ref('')
+
+    // 点击持仓股票
+    const handleStockClick = async (stock) => {
+      if (!stock || !stock.code) return
+      stockQuoteLoading.value = true
+      stockQuoteError.value = ''
+      stockQuoteData.value = null
+      stockModalVisible.value = true
+      document.body.style.overflow = 'hidden'
+
+      try {
+        const response = await marketAPI.getStockQuote(stock.code)
+        if (response.data?.success && response.data?.data) {
+          stockQuoteData.value = response.data.data
+        } else {
+          stockQuoteError.value = response.data?.error || '获取行情数据失败'
+        }
+      } catch (err) {
+        console.error('获取个股行情失败:', err)
+        stockQuoteError.value = err.response?.data?.error || '网络请求失败，请稍后重试'
+      } finally {
+        stockQuoteLoading.value = false
+      }
+    }
+
+    // 关闭个股弹窗
+    const closeStockModal = () => {
+      stockModalVisible.value = false
+      stockQuoteData.value = null
+      stockQuoteLoading.value = false
+      stockQuoteError.value = ''
+      document.body.style.overflow = ''
+    }
+
+    // 处理同类型基金点击 - 跳转到该基金详情
+    const handleSameTypeFundSelect = (fundCode) => {
+      if (!fundCode) return
+      // 关闭模态框（如果打开的话）
+      closeModal()
+      // 通知父组件导航到新基金
+      emit('navigate-to-fund', fundCode)
+    }
 
     // 处理开启AI分析
     const handleStartAIAnalysis = () => {
@@ -481,7 +550,14 @@ export default {
       showAIAnalysis,
       handleStartAIAnalysis,
       aiAnalysisData,
-      handleAnalysisComplete
+      handleAnalysisComplete,
+      stockModalVisible,
+      stockQuoteLoading,
+      stockQuoteData,
+      stockQuoteError,
+      handleStockClick,
+      closeStockModal,
+      handleSameTypeFundSelect
     }
   }
 }
@@ -812,5 +888,23 @@ export default {
 
 .modal-body > * {
   height: 100%;
+}
+
+/* 个股弹窗 - 中等尺寸，够展示走势图 */
+.stock-modal-content {
+  max-width: 620px;
+  height: auto;
+  max-height: 85vh;
+}
+
+/* 个股弹窗内允许滚动（走势图区域可能超出） */
+.stock-modal-content .modal-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.stock-modal-content .modal-body > * {
+  height: auto;
+  min-height: 100%;
 }
 </style>

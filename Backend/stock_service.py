@@ -141,23 +141,28 @@ class StockService:
         Normalize internal EastMoney code to standard stock code.
         - HK: 6990116 -> 06990
         - A: 0025580 -> 002558, 6034861 -> 603486
+        - US/foreign (contains letters): return as-is, no mangling
         """
         if not internal_code:
             return ""
 
-        str_code = str(internal_code)
-        
+        str_code = str(internal_code).strip()
+
+        # Non-numeric codes → US/foreign stock, return as-is
+        if not str_code.isdigit():
+            return str_code
+
         # Check if HK stock
         if str_code.endswith("116") and len(str_code) > 3:
             raw_code = str_code[:-3]
             return raw_code.zfill(5)
-        
-        # Assume A-Share (remove last digit suffix)
+
+        # A-Share (remove last digit suffix)
         if len(str_code) > 1:
             raw_code = str_code[:-1]
         else:
             raw_code = str_code
-            
+
         return raw_code.zfill(6)
 
     def get_stock_name(self, internal_code):

@@ -7,7 +7,7 @@
           v-for="(period, index) in periods"
           :key="index"
           :class="['period-tab', { active: activePeriod === index }]"
-          @click="activePeriod = index"
+          @click.stop="activePeriod = index"
         >
           {{ period }}
         </button>
@@ -19,7 +19,7 @@
         v-for="(fund, index) in currentFunds"
         :key="fund.code"
         class="fund-item"
-        @click="onFundClick(fund.code)"
+        @click.stop="onFundClick(fund.code)"
       >
         <div class="rank" :class="getRankClass(index)">{{ index + 1 }}</div>
         <div class="fund-info">

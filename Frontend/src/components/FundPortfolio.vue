@@ -13,10 +13,12 @@
             <span class="col-name">名称</span>
             <span class="col-market">交易所</span>
           </div>
-          <div 
-            v-for="(stock, index) in stockList" 
-            :key="stock.code || index" 
-            class="portfolio-item"
+          <div
+            v-for="(stock, index) in stockList"
+            :key="stock.code || index"
+            class="portfolio-item stock-clickable"
+            @click.stop="$emit('stock-click', stock)"
+            title="点击查看个股详情"
           >
             <span class="col-rank">{{ index + 1 }}</span>
             <span class="col-code">{{ stock.code }}</span>
@@ -37,6 +39,7 @@ import { ref, computed } from 'vue'
 
 export default {
   name: 'FundPortfolio',
+  emits: ['stock-click'],
   props: {
     portfolio: {
       type: Object,
@@ -143,8 +146,14 @@ export default {
   font-size: 12px;
 }
 
-.portfolio-item:hover {
-  background: #f9f9f9;
+.stock-clickable {
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.stock-clickable:hover {
+  background: #e6f7ff;
+  transform: translateX(2px);
 }
 
 .col-rank {
@@ -152,7 +161,8 @@ export default {
   text-align: center;
   color: #999;
   font-weight: 500;
-  margin-right: 12px;
+  margin: 0 8px;
+  flex-shrink: 0;
 }
 
 .portfolio-item .col-rank {
@@ -162,7 +172,6 @@ export default {
   background: #f0f0f0;
   border-radius: 50%;
   font-size: 11px;
-  margin: 0 8px;
   display: inline-block;
   text-align: center;
 }
@@ -172,10 +181,11 @@ export default {
 .portfolio-item:nth-child(4) .col-rank { background: #cd7f32; color: #fff; }
 
 .col-code {
-  width: 60px;
+  width: 68px;
   color: #1677ff;
   font-family: monospace;
   font-size: 11px;
+  flex-shrink: 0;
 }
 
 .col-name {
@@ -189,10 +199,11 @@ export default {
 }
 
 .col-market {
-  width: 60px;
+  width: 56px;
   text-align: left;
   color: #888;
   font-size: 11px;
+  flex-shrink: 0;
 }
 
 .no-data {

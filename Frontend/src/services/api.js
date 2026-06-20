@@ -244,6 +244,16 @@ export const marketAPI = {
   // 获取多指数分时数据
   getIndicesIntraday() {
     return api.get('/market/indices/intraday')
+  },
+
+  // 获取个股实时行情
+  getStockQuote(code) {
+    return api.get(`/stock/${code}/quote`)
+  },
+
+  // 获取个股历史K线数据
+  getStockKline(code, params = {}) {
+    return api.get(`/stock/${code}/kline`, { params })
   }
 }
 

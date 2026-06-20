@@ -177,7 +177,50 @@ class FundDataCleaner:
             '1_month_return': self.clean_js_variable(raw_data.get('syl_1y'))
         }
         return performance
-    
+
+    @staticmethod
+    def _normalize_market(market: str, code: str = '') -> str:
+        """将各种来源的交易所标识统一为中文显示名。
+
+        支持: sh/sz/bj/hk 短码 → 上交所/深交所/北交所/港交所
+              中文名原样返回
+              美股代码(字母组成) → 美股
+        """
+        if not market or str(market).strip() in ('', '--', 'None', 'null'):
+            market = ''
+        else:
+            market = str(market).strip()
+
+        # 已是标准中文名，直接返回
+        if market in ('上交所', '深交所', '北交所', '港交所', '美股'):
+            return market
+
+        market_lower = market.lower()
+        mapping = {
+            'sh': '上交所', 'shanghai': '上交所',
+            'sz': '深交所', 'shenzhen': '深交所',
+            'bj': '北交所', 'beijing': '北交所',
+            'hk': '港交所', 'hongkong': '港交所', 'hong kong': '港交所',
+            'us': '美股', 'nasdaq': '美股', 'nyse': '美股', 'amex': '美股',
+        }
+        if market_lower in mapping:
+            return mapping[market_lower]
+
+        # 中文但不在已知列表 → 尝试匹配
+        for keyword, label in [('上海', '上交所'), ('深圳', '深交所'), ('北京', '北交所'), ('香港', '港交所')]:
+            if keyword in market:
+                return label
+
+        # DataService 可能返回空 market；尝试从代码推断
+        if not market and code:
+            code_str = str(code).strip()
+            # 包含字母的代码（如 AAPL, NVDA10, TCEHY）→ 美股/境外
+            if not code_str.isdigit():
+                return '美股'
+
+        # 无法识别但非空 → 保留原值
+        return market if market else '--'
+
     def clean_portfolio_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """清洗投资组合数据"""
         # 获取原始代码列表
@@ -195,7 +238,7 @@ class FundDataCleaner:
                         'code': display_code,
                         'original_code': code,
                         'name': stock_info.get('name', 'Unknown'),
-                        'market': stock_info.get('market', '--'),
+                        'market': self._normalize_market(stock_info.get('market', '--'), display_code),
                         'ratio': 0  # 数据源缺失占比，设为0
                     })
                 except Exception as e:

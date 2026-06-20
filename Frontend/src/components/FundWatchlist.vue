@@ -554,11 +554,14 @@ export default {
       await loadWatchlist()
       // 启动估值自动刷新
       startEstimateRefreshTimer()
+      // 监听自选变更事件（来自 FundBasicInfo 的添加/移除操作），实时刷新列表
+      window.addEventListener('watchlist-updated', refreshWatchlist)
     })
-    
+
     onUnmounted(() => {
-      // 组件卸载时停止定时器
+      // 组件卸载时停止定时器并移除事件监听
       stopEstimateRefreshTimer()
+      window.removeEventListener('watchlist-updated', refreshWatchlist)
     })
 
     return {

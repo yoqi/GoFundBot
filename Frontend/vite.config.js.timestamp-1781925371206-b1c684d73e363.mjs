@@ -1,0 +1,20 @@
+// vite.config.js
+import { defineConfig } from "file:///D:/ProgramLists/GoFundBot/MyBot/Frontend/node_modules/vite/dist/node/index.js";
+import vue from "file:///D:/ProgramLists/GoFundBot/MyBot/Frontend/node_modules/@vitejs/plugin-vue/dist/index.mjs";
+var vite_config_default = defineConfig({
+  plugins: [vue()],
+  server: {
+    proxy: {
+      // 所有 /api 请求（包括 /api/eastmoney/...）都转发到 Flask 后端
+      // 东方财富代理由 Flask 的 /api/eastmoney/<path:subpath> 端点处理
+      "/api": {
+        target: "http://localhost:5000",
+        changeOrigin: true
+      }
+    }
+  }
+});
+export {
+  vite_config_default as default
+};
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsidml0ZS5jb25maWcuanMiXSwKICAic291cmNlc0NvbnRlbnQiOiBbImNvbnN0IF9fdml0ZV9pbmplY3RlZF9vcmlnaW5hbF9kaXJuYW1lID0gXCJEOlxcXFxQcm9ncmFtTGlzdHNcXFxcR29GdW5kQm90XFxcXE15Qm90XFxcXEZyb250ZW5kXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ZpbGVuYW1lID0gXCJEOlxcXFxQcm9ncmFtTGlzdHNcXFxcR29GdW5kQm90XFxcXE15Qm90XFxcXEZyb250ZW5kXFxcXHZpdGUuY29uZmlnLmpzXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ltcG9ydF9tZXRhX3VybCA9IFwiZmlsZTovLy9EOi9Qcm9ncmFtTGlzdHMvR29GdW5kQm90L015Qm90L0Zyb250ZW5kL3ZpdGUuY29uZmlnLmpzXCI7aW1wb3J0IHsgZGVmaW5lQ29uZmlnIH0gZnJvbSAndml0ZSdcbmltcG9ydCB2dWUgZnJvbSAnQHZpdGVqcy9wbHVnaW4tdnVlJ1xuXG5leHBvcnQgZGVmYXVsdCBkZWZpbmVDb25maWcoe1xuICBwbHVnaW5zOiBbdnVlKCldLFxuICBzZXJ2ZXI6IHtcbiAgICBwcm94eToge1xuICAgICAgLy8gXHU2MjQwXHU2NzA5IC9hcGkgXHU4QkY3XHU2QzQyXHVGRjA4XHU1MzA1XHU2MkVDIC9hcGkvZWFzdG1vbmV5Ly4uLlx1RkYwOVx1OTBGRFx1OEY2Q1x1NTNEMVx1NTIzMCBGbGFzayBcdTU0MEVcdTdBRUZcbiAgICAgIC8vIFx1NEUxQ1x1NjVCOVx1OEQyMlx1NUJDQ1x1NEVFM1x1NzQwNlx1NzUzMSBGbGFzayBcdTc2ODQgL2FwaS9lYXN0bW9uZXkvPHBhdGg6c3VicGF0aD4gXHU3QUVGXHU3MEI5XHU1OTA0XHU3NDA2XG4gICAgICAnL2FwaSc6IHtcbiAgICAgICAgdGFyZ2V0OiAnaHR0cDovL2xvY2FsaG9zdDo1MDAwJyxcbiAgICAgICAgY2hhbmdlT3JpZ2luOiB0cnVlXG4gICAgICB9XG4gICAgfVxuICB9XG59KVxuIl0sCiAgIm1hcHBpbmdzIjogIjtBQUFvVCxTQUFTLG9CQUFvQjtBQUNqVixPQUFPLFNBQVM7QUFFaEIsSUFBTyxzQkFBUSxhQUFhO0FBQUEsRUFDMUIsU0FBUyxDQUFDLElBQUksQ0FBQztBQUFBLEVBQ2YsUUFBUTtBQUFBLElBQ04sT0FBTztBQUFBO0FBQUE7QUFBQSxNQUdMLFFBQVE7QUFBQSxRQUNOLFFBQVE7QUFBQSxRQUNSLGNBQWM7QUFBQSxNQUNoQjtBQUFBLElBQ0Y7QUFBQSxFQUNGO0FBQ0YsQ0FBQzsiLAogICJuYW1lcyI6IFtdCn0K

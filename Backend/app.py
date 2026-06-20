@@ -567,6 +567,72 @@ def get_fund_detail(fund_code):
 
     return jsonify({"error": "Fund not found"}), 404
 
+@app.route('/api/stock/<code>/quote', methods=['GET'])
+def get_stock_quote(code):
+    """
+    获取个股实时行情数据
+
+    调用腾讯财经接口获取实时行情，包括：
+    - 基础：名称、代码、交易所
+    - 行情：当前价、涨跌额、涨跌幅、今开、昨收、最高、最低
+    - 交易：成交量、成交额、换手率、振幅
+    - 估值：市盈率、总市值
+
+    Returns:
+        - 成功: {success: true, data: {...}}
+        - 失败: {success: false, error: "..."}
+    """
+    from services.market_data import get_market_data_service as get_mds
+    try:
+        mds = get_mds()
+        quote = mds.get_realtime_quote(code, use_cache=True)
+        if not quote:
+            return jsonify({"success": False, "error": f"未找到股票 {code} 的行情数据"}), 404
+        return jsonify({"success": True, "data": quote})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/stock/<code>/kline', methods=['GET'])
+def get_stock_kline(code):
+    """
+    获取个股历史 K 线数据
+
+    数据来源：东方财富 A 股 K 线接口（前复权）
+
+    Query params:
+        - period: daily / weekly / monthly（默认 daily）
+        - adjust: qfq（前复权）/ hfq（后复权）/ none（默认 qfq）
+        - startDate: 起始日期 YYYYMMDD（可选）
+        - endDate: 结束日期 YYYYMMDD（可选）
+
+    Returns:
+        - 成功: {success: true, data: [{date, open, close, high, low, volume, amount, ...}], total_count: N}
+        - 失败: {success: false, error: "..."}
+    """
+    from services.market_data import get_market_data_service as get_mds
+    period = request.args.get('period', 'daily')
+    adjust = request.args.get('adjust', 'qfq')
+    start_date = request.args.get('startDate', '')
+    end_date = request.args.get('endDate', '')
+    try:
+        # 规范化股票代码：兼容 sh600519 / 600519.SH / 600519 等格式
+        normalized_code = re.sub(r'^(sh|sz|bj|SH|SZ|BJ)|\.(SH|SZ|BJ)$', '', code.strip())
+        mds = get_mds()
+        result = mds.get_a_stock_kline(
+            normalized_code,
+            klt=period,
+            fqt=adjust,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not result.get('success'):
+            return jsonify(result), 404
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/market/daily', methods=['GET'])
 def get_daily_market():
     """
