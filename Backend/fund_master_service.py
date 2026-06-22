@@ -736,13 +736,16 @@ class FundMasterService:
                     if data_date_str:
                         try:
                             data_date = datetime.datetime.strptime(data_date_str, "%Y-%m-%d")
-                            days_old = (now - data_date).days
-                            if days_old > 2:
-                                # 数据过期，价格和涨幅都不可靠
-                                price = 0.0
-                                pct = 0.0
+                            calendar_days_old = (now - data_date).days
+                            # 计算交易日数量：排除周末（粗估每个周末2天）
+                            weeks = calendar_days_old // 7
+                            trading_days_old = calendar_days_old - (weeks * 2)
+                            # 全球指数可能在非交易日不更新，5个交易日(约1周)内视为有效
+                            if trading_days_old > 5:
+                                # 数据确实过期，但仍显示最后可用数据而不是归零
+                                # 归零会让用户以为市场暴跌，不如显示历史数据
                                 logger.info(f"[Sina] {fallback_name} 数据日期 {data_date_str} "
-                                            f"({days_old}天前)，已置为无效")
+                                            f"({calendar_days_old}天前/{trading_days_old}交易日)，数据可能陈旧但仍显示")
                         except ValueError:
                             pass
 

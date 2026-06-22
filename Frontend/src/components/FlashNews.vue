@@ -1,6 +1,6 @@
-<!-- 7x24 快讯组件 -->
+<!-- 7x24 快讯组件 - 支持无限滚动、多数据源聚合 -->
 <template>
-  <div class="flash-news-container">
+  <div class="flash-news-container" ref="containerRef">
     <!-- 头部 -->
     <div class="news-header-bar">
       <div class="header-left">
@@ -8,7 +8,8 @@
         <span v-if="!loading && newsList.length" class="count-badge">{{ newsList.length }} 条</span>
       </div>
       <div class="header-right">
-        <button class="refresh-btn" @click="fetchNews" :disabled="loading" title="刷新快讯">
+        <span v-if="sourcesText" class="sources-tag" :title="sourcesText">{{ sourcesText }}</span>
+        <button class="refresh-btn" @click="resetAndFetch" :disabled="loading" title="刷新快讯">
           <span :class="{ spinning: loading }">🔄</span>
         </button>
       </div>
@@ -24,10 +25,10 @@
     </div>
 
     <!-- 错误 -->
-    <div v-else-if="error" class="error-state">
+    <div v-else-if="error && !newsList.length" class="error-state">
       <span class="error-icon">⚠️</span>
       <span class="error-text">{{ error }}</span>
-      <button class="retry-btn" @click="fetchNews">重试</button>
+      <button class="retry-btn" @click="resetAndFetch">重试</button>
     </div>
 
     <!-- 空 -->
@@ -37,10 +38,10 @@
     </div>
 
     <!-- 列表 -->
-    <div v-else class="news-list">
+    <div v-else class="news-list" ref="listRef" @scroll="onScroll">
       <TransitionGroup name="news-fade">
         <div
-          v-for="(news, index) in newsList"
+          v-for="(news, index) in displayedNews"
           :key="news._key || index"
           class="news-item"
           :class="{
@@ -59,12 +60,20 @@
           </p>
         </div>
       </TransitionGroup>
+
+      <!-- 底部加载状态 -->
+      <div v-if="loadingMore" class="loading-more">
+        <span class="loading-dot"></span> 加载更多快讯...
+      </div>
+      <div v-else-if="!hasMore && newsList.length > 0" class="loading-more end">
+        — 已加载全部快讯 —
+      </div>
     </div>
 
     <!-- 底部 -->
     <div v-if="updateTime && !loading" class="news-footer">
       <span class="footer-dot online"></span>
-      <span>更新于 {{ updateTime.slice(-8) }}</span>
+      <span>更新于 {{ formatUpdateTime(updateTime) }}</span>
     </div>
 
     <!-- 详情弹窗 -->
@@ -110,7 +119,7 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { marketAPI } from '../services/api'
 
 export default {
@@ -122,13 +131,32 @@ export default {
   },
   setup(props) {
     const MAX_LEN = 35
+    const PAGE_SIZE = 50 // Items per page fetch
+    const DISPLAY_BATCH = 30 // Items to reveal per scroll
+
     const newsList = ref([])
     const loading = ref(false)
+    const loadingMore = ref(false)
     const error = ref(null)
     const updateTime = ref('')
+    const currentPage = ref(1)
+    const hasMore = ref(true)
+    const displayCount = ref(DISPLAY_BATCH)
     const prevKeys = new Set()
     const modal = reactive({ visible: false, news: null })
+    const listRef = ref(null)
+    const containerRef = ref(null)
     let refreshTimer = null
+
+    const displayedNews = computed(() => {
+      return newsList.value.slice(0, displayCount.value)
+    })
+
+    const sourcesText = computed(() => {
+      const sources = new Set()
+      newsList.value.forEach(n => { if (n.source) sources.add(n.source) })
+      return [...sources].join(' + ') || ''
+    })
 
     const truncate = (text) => {
       if (!text) return ''
@@ -147,33 +175,104 @@ export default {
       document.body.style.overflow = ''
     }
 
-    const fetchNews = async () => {
-      loading.value = true
+    const mergeNews = (incoming) => {
+      const existingKeys = new Set(newsList.value.map(n => n._key))
+      const newItems = []
+      incoming.forEach(n => {
+        const key = n.publish_time + n.title?.slice(0, 20)
+        if (!existingKeys.has(key)) {
+          newItems.push({
+            ...n,
+            _key: key,
+            _isNew: prevKeys.size > 0 && !prevKeys.has(key),
+          })
+          existingKeys.add(key)
+        }
+      })
+      if (newItems.length) {
+        newsList.value = [...newsList.value, ...newItems]
+      }
+    }
+
+    const fetchNews = async (page = 1, append = false) => {
+      if (page === 1) {
+        loading.value = true
+      } else {
+        loadingMore.value = true
+      }
       error.value = null
       try {
-        const response = await marketAPI.getFlashNews(props.count)
+        const response = await marketAPI.getFlashNews(PAGE_SIZE, page)
         if (response.data.success) {
           const incoming = response.data.data || []
-          const currentKeys = new Set(incoming.map(n => n.publish_time + n.title?.slice(0, 20)))
-          const enriched = incoming.map(n => ({
-            ...n,
-            _key: n.publish_time + n.title?.slice(0, 20),
-            _isNew: prevKeys.size > 0 && !prevKeys.has(n.publish_time + n.title?.slice(0, 20)),
-          }))
-          prevKeys.clear()
-          currentKeys.forEach(k => prevKeys.add(k))
-          newsList.value = enriched
+
+          if (page === 1) {
+            // First page: replace entirely and track new items
+            const currentKeys = new Set(incoming.map(n => n.publish_time + n.title?.slice(0, 20)))
+            const enriched = incoming.map(n => ({
+              ...n,
+              _key: n.publish_time + n.title?.slice(0, 20),
+              _isNew: prevKeys.size > 0 && !prevKeys.has(n.publish_time + n.title?.slice(0, 20)),
+            }))
+            prevKeys.clear()
+            currentKeys.forEach(k => prevKeys.add(k))
+            newsList.value = enriched
+            displayCount.value = DISPLAY_BATCH
+            currentPage.value = 1
+          } else if (append) {
+            mergeNews(incoming)
+          }
+
+          hasMore.value = response.data.hasMore ?? (incoming.length >= PAGE_SIZE)
           updateTime.value = response.data.update_time || ''
+
+          // Clear new-item animation after 2s
           nextTick(() => {
             setTimeout(() => { newsList.value.forEach(n => (n._isNew = false)) }, 2000)
           })
-        } else {
+        } else if (page === 1) {
           error.value = response.data.error || '获取快讯失败'
         }
       } catch (e) {
-        error.value = '网络异常，请稍后重试'
+        if (page === 1) {
+          error.value = '网络异常，请稍后重试'
+        }
       } finally {
         loading.value = false
+        loadingMore.value = false
+      }
+    }
+
+    const loadMore = async () => {
+      if (loadingMore.value || !hasMore.value) return
+
+      // First try revealing more from already-fetched data
+      if (displayCount.value < newsList.value.length) {
+        displayCount.value = Math.min(displayCount.value + DISPLAY_BATCH, newsList.value.length)
+        return
+      }
+
+      // Need to fetch next page
+      const nextPage = currentPage.value + 1
+      await fetchNews(nextPage, true)
+      currentPage.value = nextPage
+      // Reveal the new items
+      displayCount.value = Math.min(displayCount.value + DISPLAY_BATCH, newsList.value.length)
+    }
+
+    const resetAndFetch = () => {
+      displayCount.value = DISPLAY_BATCH
+      currentPage.value = 1
+      hasMore.value = true
+      fetchNews(1, false)
+    }
+
+    const onScroll = () => {
+      const el = listRef.value
+      if (!el) return
+      // Load more when within 80px of the bottom
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+        loadMore()
       }
     }
 
@@ -193,15 +292,33 @@ export default {
       } catch { return timeStr.slice(5, 16) }
     }
 
+    const formatUpdateTime = (timeStr) => {
+      if (!timeStr) return ''
+      const normalized = String(timeStr).replace(' ', 'T')
+      const date = new Date(normalized)
+      if (!Number.isNaN(date.getTime())) {
+        return date.toLocaleTimeString('zh-CN', {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      }
+      const match = String(timeStr).match(/(\d{2}:\d{2}:\d{2})/)
+      return match ? match[1] : String(timeStr)
+    }
+
     onMounted(() => {
-      fetchNews()
-      if (props.autoRefresh) refreshTimer = setInterval(fetchNews, props.refreshInterval)
+      fetchNews(1, false)
+      if (props.autoRefresh) refreshTimer = setInterval(() => fetchNews(1, false), props.refreshInterval)
     })
     onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer) })
 
     return {
-      newsList, loading, error, updateTime, modal,
-      truncate, openDetail, closeDetail, fetchNews, formatRelativeTime,
+      newsList, displayedNews, loading, loadingMore, error, updateTime, modal,
+      hasMore, sourcesText, listRef, containerRef,
+      truncate, openDetail, closeDetail, fetchNews, loadMore, resetAndFetch,
+      onScroll, formatRelativeTime, formatUpdateTime,
     }
   },
 }
@@ -231,6 +348,14 @@ export default {
 .header-left { display: flex; align-items: center; gap: 8px; }
 .header-title { margin: 0; font-size: 15px; font-weight: 700; color: var(--text-primary, #1a1a1a); }
 .count-badge { font-size: 11px; font-weight: 600; color: #1677ff; background: #eef4ff; padding: 2px 8px; border-radius: 10px; }
+
+.header-right { display: flex; align-items: center; gap: 8px; }
+
+.sources-tag {
+  font-size: 10px; color: #8c8c8c; background: #f5f5f5;
+  padding: 2px 8px; border-radius: 10px; max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .refresh-btn {
   width: 30px; height: 30px;
@@ -297,6 +422,18 @@ export default {
 
 .item-title { margin: 0; font-size: 13px; line-height: 1.55; color: #262626; }
 .news-item:hover .item-title { color: #1677ff; }
+
+/* ── 加载更多 ──────────────────────────────────────── */
+.loading-more {
+  text-align: center; padding: 14px; font-size: 12px; color: #999;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.loading-more.end { color: #bfbfbf; }
+.loading-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #1677ff;
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
 /* ── 底部 ──────────────────────────────────────────── */
 .news-footer {

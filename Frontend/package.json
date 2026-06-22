@@ -9,10 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.3.4",
     "axios": "^1.5.0",
     "echarts": "^5.4.3",
-    "vue-echarts": "^6.6.1"
+    "vue": "^3.3.4",
+    "vue-echarts": "^6.6.1",
+    "vxe-table": "^4.19.17",
+    "xe-utils": "^3.9.1"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^4.3.4",

@@ -112,6 +112,82 @@ class FundPortfolio(Base):
     updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class StockIndustry(Base):
+    """Local cache for stock industry labels used by fund holding analysis."""
+    __tablename__ = 'stock_industry'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(6), unique=True, nullable=False, index=True)
+    stock_name = Column(String(100))
+    industry = Column(String(100), index=True)
+    region = Column(String(100))
+    concepts_json = Column(Text)
+    source = Column(String(50), default='data_service')
+    updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class FundIndustryTag(Base):
+    """Persisted fund industry classification inferred from top stock holdings."""
+    __tablename__ = 'fund_industry_tag'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fund_code = Column(String(6), unique=True, nullable=False, index=True)
+    industry_tag = Column(String(100), nullable=False, index=True)
+    industry_count = Column(Integer, default=0)
+    industry_ratio = Column(Float, default=0.0)
+    basis = Column(String(30))
+    source = Column(String(50), default='top_stock_holdings')
+    detail_json = Column(Text)
+    unresolved_count = Column(Integer, default=0)
+    updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class FundIndustryPerformance(Base):
+    """Aggregated performance for fund industry tags, stored for research dashboards."""
+    __tablename__ = 'fund_industry_performance'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    industry_tag = Column(String(100), unique=True, nullable=False, index=True)
+    fund_count = Column(Integer, default=0)
+    return_3m_avg = Column(Float)
+    return_3m_median = Column(Float)
+    return_6m_avg = Column(Float)
+    return_6m_median = Column(Float)
+    return_1y_avg = Column(Float)
+    return_1y_median = Column(Float)
+    return_3y_avg = Column(Float)
+    return_3y_median = Column(Float)
+    positive_3m_rate = Column(Float)
+    positive_6m_rate = Column(Float)
+    positive_1y_rate = Column(Float)
+    positive_3y_rate = Column(Float)
+    detail_json = Column(Text)
+    updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class FundEtfTracking(Base):
+    """ETF daily tracking snapshot stored in funds.db."""
+    __tablename__ = 'fund_etf_tracking'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fund_code = Column(String(6), unique=True, nullable=False, index=True)
+    fund_name = Column(String(100))
+    latest_price = Column(Float)
+    iopv = Column(Float)
+    discount_rate = Column(Float)
+    change_amount = Column(Float)
+    change_percent = Column(Float)
+    volume = Column(Float)
+    amount = Column(Float)
+    turnover_rate = Column(Float)
+    fund_share = Column(Float)
+    market_value = Column(Float)
+    source = Column(String(50), default='akshare.eastmoney')
+    trade_time = Column(DateTime)
+    detail_json = Column(Text)
+    updated_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class FundExtraData(Base):
     """
     基金扩展数据表

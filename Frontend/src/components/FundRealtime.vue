@@ -510,6 +510,17 @@ export default {
       return total
     })
 
+    const totalPreviousAsset = computed(() => {
+      let total = 0
+      funds.value.forEach(fund => {
+        const h = holdings.value[fund.code]
+        if (h && h.share) {
+          total += h.share * getPreviousPrice(fund)
+        }
+      })
+      return total
+    })
+
     const totalProfitTotal = computed(() => {
       let total = 0
       funds.value.forEach(fund => {
@@ -538,8 +549,8 @@ export default {
     })
 
     const todayReturnRate = computed(() => {
-      if (!totalCost.value) return 0
-      return (totalProfitToday.value / totalCost.value) * 100
+      if (!totalPreviousAsset.value) return 0
+      return (totalProfitToday.value / totalPreviousAsset.value) * 100
     })
 
     const getValueClass = (val) => {
@@ -774,14 +785,7 @@ export default {
     }
 
     const getFundTrendSeries = (fund) => {
-      // 优先使用累计收益率走势（含分红再投资，与收益率口径一致）
-      if (Array.isArray(fund?.totalReturnTrend) && fund.totalReturnTrend.length > 0) {
-        return fund.totalReturnTrend
-          .map(parseTrendPoint)
-          .filter(Boolean)
-          .sort((a, b) => a.date.localeCompare(b.date))
-      }
-      // 回退到单位净值走势
+      // 使用单位净值走势数据（totalReturnTrend 是业绩对比基准，含多系列，不适合画走势图）
       if (!Array.isArray(fund?.netWorthTrend)) return []
       return fund.netWorthTrend
         .map(parseTrendPoint)
@@ -1533,6 +1537,7 @@ export default {
       hasHoldings,
       totalAsset,
       totalCost,
+      totalPreviousAsset,
       totalProfitToday,
       totalProfitTotal,
       totalReturnRate,
@@ -1801,12 +1806,12 @@ export default {
   padding: 4px 6px;
 }
 .c-svg { width: 100%; height: 100%; }
-.c-axis { stroke: #cfd7e5; stroke-width: 0.7; }
-.c-grid { stroke: #e9edf5; stroke-width: 0.55; }
+.c-axis { stroke: #cfd7e5; stroke-width: 0.5; shape-rendering: crispEdges; }
+.c-grid { stroke: #e9edf5; stroke-width: 0.5; shape-rendering: crispEdges; }
 .c-fill { fill: rgba(245, 34, 45, 0.14); }
 .c-fill.up { fill: rgba(245, 34, 45, 0.14); }
 .c-fill.down { fill: rgba(82, 196, 26, 0.14); }
-.c-line { fill: none; stroke: #ea4a4a; stroke-width: 0.85; }
+.c-line { fill: none; stroke: #ea4a4a; stroke-width: 1; shape-rendering: geometricPrecision; }
 .c-line.up { stroke: #ea4a4a; }
 .c-line.down { stroke: #33a853; }
 .c-y-label { fill: #7f8897; font-size: 3.1px; }

@@ -210,8 +210,8 @@ class DataServiceClient:
     # News – flash news
     # ------------------------------------------------------------------
 
-    def get_flash_news(self, count: int = 30) -> Dict[str, Any]:
-        return self._get("/news/flash", params={"count": str(count)})
+    def get_flash_news(self, count: int = 30, page: int = 1) -> Dict[str, Any]:
+        return self._get("/news/flash", params={"count": str(count), "page": str(page)})
 
     # ------------------------------------------------------------------
     # HTTP transport

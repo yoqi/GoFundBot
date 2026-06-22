@@ -9,14 +9,17 @@ const clsNewsProvider = new ClsNewsProvider();
 
 const allProviders: NewsProvider[] = [eastmoneyNewsProvider, baiduNewsProvider, clsNewsProvider];
 
-export async function getFlashNews(count = 30): Promise<ServiceResult<NewsListDto>> {
+export async function getFlashNews(count = 30, page = 1): Promise<ServiceResult<NewsListDto>> {
+  // Fetch more items than needed to allow for dedup and pagination
+  const fetchCount = count * 2;
+
   const providerResults = await Promise.allSettled(
     allProviders.map(async (provider) => {
       try {
         if (!provider.flashNews) {
           throw new AppError('PROVIDER_UNAVAILABLE', `${provider.name} does not implement flashNews`, 501);
         }
-        const result = await provider.flashNews(count);
+        const result = await provider.flashNews(fetchCount);
         return { provider: provider.name, items: result.items };
       } catch {
         return { provider: provider.name, items: [] as NewsItemDto[] };
@@ -50,15 +53,20 @@ export async function getFlashNews(count = 30): Promise<ServiceResult<NewsListDt
     return true;
   });
 
-  // Sort by publishedAt descending
+  // Keep the visible timeline strictly newest-first. Source diversity comes
+  // from fetching every provider, but ordering should never scramble time.
   deduped.sort((a, b) => {
     const ta = a.publishedAt ?? '';
     const tb = b.publishedAt ?? '';
     return tb.localeCompare(ta);
   });
 
-  // Limit to count
-  const items = deduped.slice(0, count);
+  // Paginate: return the requested page
+  const startIdx = (page - 1) * count;
+  const endIdx = startIdx + count;
+  const items = deduped.slice(startIdx, endIdx);
+
+  const hasMore = endIdx < deduped.length;
 
   // Build meta
   const provider = successfulProviders.length === 0
@@ -68,7 +76,7 @@ export async function getFlashNews(count = 30): Promise<ServiceResult<NewsListDt
       : 'mixed';
 
   return {
-    data: { items },
+    data: { items, total: deduped.length, hasMore },
     provider,
     fallback: failedProviders.length > 0,
     cached: false,

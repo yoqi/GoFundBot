@@ -9,6 +9,22 @@ const api = axios.create({
   timeout: 600000
 })
 
+const localBackendApi = axios.create({
+  baseURL: 'http://localhost:5000/api',
+  timeout: 600000
+})
+
+async function getWithLocalFallback(path, config = {}) {
+  try {
+    return await api.get(path, config)
+  } catch (error) {
+    if (error?.message === 'Network Error' && API_BASE_URL === '/api') {
+      return localBackendApi.get(path, config)
+    }
+    throw error
+  }
+}
+
 export const fundAPI = {
   // 搜索基金
   searchFunds(keyword) {
@@ -28,6 +44,11 @@ export const fundAPI = {
   // 获取基金详细信息
   getFundDetail(fundCode) {
     return api.get(`/fund/${fundCode}`)
+  },
+
+  getFundIndustryExposure(fundCode, refresh = false) {
+    const params = refresh ? { refresh: true } : {}
+    return api.get(`/fund/${fundCode}/industry-exposure`, { params })
   },
   
   // 获取基金基础信息
@@ -179,6 +200,18 @@ export const screeningAPI = {
   getAvailableTypes(params) {
     return api.post('/screening/available-types', params)
   },
+
+  getIndustryTags() {
+    return api.get('/screening/industry-tags')
+  },
+
+  getStockIndustryStatus() {
+    return api.get('/screening/stock-industry/status')
+  },
+
+  warmupStockIndustry(params = {}) {
+    return api.post('/screening/stock-industry/warmup', params)
+  },
   
   // 获取单只基金筛选详情
   getFundDetail(fundCode) {
@@ -217,8 +250,8 @@ export const marketAPI = {
   },
   
   // 获取7x24快讯
-  getFlashNews(count = 20) {
-    return api.get(`/market/news?count=${count}`)
+  getFlashNews(count = 30, page = 1) {
+    return api.get(`/market/news?count=${count}&page=${page}`)
   },
   
   // 获取行业板块排行
@@ -264,6 +297,33 @@ export const marketAPI = {
   // 获取个股历史K线数据
   getStockKline(code, params = {}) {
     return api.get(`/stock/${code}/kline`, { params })
+  }
+}
+
+// ==================== 投研看板 API ====================
+export const researchAPI = {
+  getDashboard(params = {}) {
+    return getWithLocalFallback('/research/dashboard', { params })
+  },
+
+  getMarketStats() {
+    return getWithLocalFallback('/research/market-stats')
+  },
+
+  getFundDashboard(limit = 5) {
+    return getWithLocalFallback('/research/fund-dashboard', { params: { limit } })
+  },
+
+  getEtfTracking(limit = 80, refresh = false) {
+    return getWithLocalFallback('/research/etf-tracking', { params: { limit, refresh } })
+  },
+
+  getIndustryPerformance() {
+    return getWithLocalFallback('/research/industry-performance')
+  },
+
+  getSectorSummary(limit = 50) {
+    return getWithLocalFallback('/research/sector-summary', { params: { limit } })
   }
 }
 

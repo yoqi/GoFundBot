@@ -45,6 +45,19 @@ def migrate_db():
         except Exception as e:
             print(f"Migration check for daily_market_summary: {e}")
 
+        # Screening no longer persists full NAV history; risk metrics are stored in fund_risk_metrics.
+        try:
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='fund_nav_history'"))
+            if result.fetchone():
+                count_result = conn.execute(text("SELECT COUNT(*) FROM fund_nav_history"))
+                row_count = count_result.scalar() or 0
+                if row_count > 0:
+                    conn.execute(text("DELETE FROM fund_nav_history"))
+                    conn.commit()
+                    print(f"Migration: Cleared {row_count} rows from fund_nav_history")
+        except Exception as e:
+            print(f"Migration cleanup for fund_nav_history: {e}")
+
 def init_db():
     # 确保 Data 目录存在
     (PROJECT_ROOT / "Data").mkdir(exist_ok=True)

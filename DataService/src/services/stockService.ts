@@ -19,9 +19,11 @@ export async function getStockReference(code: string): Promise<ServiceResult<Sto
 }
 
 function assertStockCode(value: string | undefined): string {
-  const code = assertCode(value, 'code').replace(/^(sh|sz)/i, '');
-  if (!/^\d{6}$/.test(code)) {
-    throw new AppError('INVALID_ARGUMENT', 'Stock code must be a 6-digit code', 400, { code: value });
+  const code = assertCode(value, 'code')
+    .replace(/^(sh|sz|hk)/i, '')
+    .replace(/\.(SH|SZ|HK)$/i, '');
+  if (!/^\d{5,6}$/.test(code)) {
+    throw new AppError('INVALID_ARGUMENT', 'Stock code must be a 5-digit HK code or 6-digit A-share code', 400, { code: value });
   }
   return code;
 }

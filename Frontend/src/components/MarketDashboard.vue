@@ -37,9 +37,9 @@
         <SectorRank :limit="500" />
       </div>
       
-      <!-- 快讯 Tab -->
+      <!-- 快讯 Tab - 无限滚动，不设上限 -->
       <div v-show="activeTab === 'news'" class="tab-content">
-        <FlashNews :count="50" />
+        <FlashNews :count="50" :refreshInterval="60000" />
       </div>
       
       <!-- 贵金属 Tab -->

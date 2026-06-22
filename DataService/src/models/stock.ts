@@ -3,4 +3,7 @@ export interface StockReferenceDto {
   name: string;
   market: string;
   symbol: string;
+  industry?: string | null;
+  region?: string | null;
+  concepts?: string[];
 }

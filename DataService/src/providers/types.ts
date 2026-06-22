@@ -119,6 +119,8 @@ export interface NewsItemDto {
 
 export interface NewsListDto {
   items: NewsItemDto[];
+  total?: number;
+  hasMore?: boolean;
 }
 
 export interface FundProvider {

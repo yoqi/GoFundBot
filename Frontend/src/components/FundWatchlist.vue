@@ -290,6 +290,8 @@ export default {
               }
             }
           })
+
+          await loadWatchlist()
           
           lastEstimateUpdate.value = new Date().toLocaleTimeString()
         }

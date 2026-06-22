@@ -3,13 +3,14 @@ from flask_cors import CORS
 from database import init_db, SessionLocal
 from models import (FundBasicInfo, FundTrend, FundEstimate, FundPortfolio, 
                     FundExtraData, FundWatchlist, FundWatchlistGroup, 
-                    FundRiskMetrics, FundScreeningRank, DataFetchTask, FundNavHistory)
+                    FundRiskMetrics, FundScreeningRank, DataFetchTask, FundNavHistory,
+                    StockIndustry, FundIndustryTag, FundIndustryPerformance, FundEtfTracking)
 from fund_api import FundAPI
 from fund_list_cache import get_fund_list_cache
 from ai_service import get_ai_service
 from fund_master_routes import fund_master_bp
 from data_service_routes import data_service_bp
-from services.data_service_client import DataServiceError, get_data_service_client
+from services.data_service_client import DataServiceClient, DataServiceError, get_data_service_client
 from services.data_service_legacy_mapper import map_data_service_detail_to_legacy
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc, and_, or_, func
@@ -145,6 +146,963 @@ def _json_loads(data, default):
     except Exception:
         return default
 
+def _normalize_stock_code(code):
+    text = str(code or '').strip()
+    text = re.sub(r'^(sh|sz|hk)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\.(SH|SZ|HK)$', '', text, flags=re.IGNORECASE)
+    if re.match(r'^[A-Za-z]{1,6}([.-][A-Za-z]{1,3})?$', text):
+        return text.upper()
+    return text if re.match(r'^\d{5,6}$', text) else text
+
+def _is_us_stock_code(code):
+    text = str(code or '').strip().upper()
+    if not text or re.match(r'^\d{5,6}$', text):
+        return False
+    return bool(re.match(r'^[A-Z]{1,6}([.-][A-Z]{1,3})?$', text))
+
+def _safe_ratio(value):
+    if value is None:
+        return 0.0
+    text = str(value).strip().replace('%', '')
+    try:
+        return float(text)
+    except Exception:
+        return 0.0
+
+def _portfolio_holding_items(raw_holdings):
+    if not isinstance(raw_holdings, list):
+        return []
+
+    if raw_holdings and isinstance(raw_holdings[0], dict):
+        items = []
+        for item in raw_holdings:
+            code = _normalize_stock_code(item.get('code') or item.get('stock_code') or item.get('gpdm'))
+            if not code:
+                continue
+            items.append({
+                **item,
+                'code': code,
+                'name': item.get('name') or item.get('stock_name') or item.get('gpmc') or '',
+                'ratio': _safe_ratio(item.get('ratio') or item.get('position') or item.get('hold_ratio')),
+            })
+        return items
+
+    items = []
+    for index in range(0, len(raw_holdings), 3):
+        if index + 2 >= len(raw_holdings):
+            break
+        code = _normalize_stock_code(raw_holdings[index])
+        if not code:
+            continue
+        items.append({
+            'code': code,
+            'name': raw_holdings[index + 1],
+            'ratio': _safe_ratio(raw_holdings[index + 2]),
+        })
+    return items
+
+def _fund_name_or_type_text(portfolio: dict):
+    if not isinstance(portfolio, dict):
+        return ''
+    parts = [
+        portfolio.get('fund_name'),
+        portfolio.get('name'),
+        portfolio.get('fund_type'),
+        portfolio.get('type'),
+        portfolio.get('index_name'),
+        portfolio.get('tracking_index'),
+    ]
+    return ' '.join(str(part) for part in parts if part)
+
+def _is_broad_index_fund_text(text):
+    text = str(text or '').upper()
+    broad_keywords = [
+        '沪深300', '中证500', '中证800', '中证1000', '中证2000',
+        '上证50', '上证180', '深证100', '创业板指', '创业板50',
+        '科创50', '科创100', 'A500', 'MSCI', '央视50',
+        '宽基', '综合指数', '综指', '指数增强',
+        'CSI 300', 'CSI300', 'CSI 500', 'CSI500', 'SSE 50',
+    ]
+    return any(keyword.upper() in text for keyword in broad_keywords)
+
+def _is_etf_feeder_text(text):
+    text = str(text or '').upper()
+    keywords = ['ETF联接', 'ETF连接', 'ETF链接', '联接基金', '联接A', '联接C', 'ETF FEEDER']
+    return any(keyword.upper() in text for keyword in keywords)
+
+def _topic_from_fund_text(text):
+    text = str(text or '').upper()
+    topic_rules = [
+        ('半导体', ['半导体', '芯片', '集成电路', 'CHIP', 'SEMICONDUCTOR']),
+        ('证券', ['证券', '券商', '证券公司', '证券保险']),
+        ('银行', ['银行', 'BANK']),
+        ('保险', ['保险']),
+        ('医药', ['医药', '医疗', '生物医药', '创新药', '医疗器械', 'HEALTH', 'PHARMA']),
+        ('消费', ['消费', '食品饮料', '主要消费', '可选消费', '酒', '白酒', '家电']),
+        ('新能源', ['新能源', '新能源车', '新能源汽车', '光伏', '太阳能', '储能', '电池', '锂电']),
+        ('军工', ['军工', '国防', '航天', '航空']),
+        ('人工智能', ['人工智能', 'AI', '机器人', '智能']),
+        ('计算机', ['计算机', '软件', '云计算', '大数据', '互联网']),
+        ('通信', ['通信', '5G', '通讯']),
+        ('电子', ['电子', '消费电子']),
+        ('传媒', ['传媒', '游戏', '动漫']),
+        ('房地产', ['房地产', '地产']),
+        ('有色金属', ['有色', '有色金属', '稀土', '黄金', '贵金属']),
+        ('煤炭', ['煤炭']),
+        ('钢铁', ['钢铁']),
+        ('化工', ['化工', '化学']),
+        ('农业', ['农业', '农牧', '畜牧', '养殖']),
+        ('红利', ['红利', '股息', '高息']),
+    ]
+    for topic, keywords in topic_rules:
+        if any(keyword.upper() in text for keyword in keywords):
+            return topic
+    return None
+
+def _is_broad_index_fund_text(text):
+    text = str(text or '').upper()
+    broad_keywords = [
+        '沪深300', '中证500', '中证800', '中证1000', '中证2000',
+        '上证50', '上证180', '深证100', '创业板指', '创业板50',
+        '科创50', '科创100', 'A500', 'MSCI', '央企50',
+        '宽基', '综合指数', '综指', '指数增强',
+        'CSI 300', 'CSI300', 'CSI 500', 'CSI500', 'SSE 50',
+    ]
+    return any(keyword.upper() in text for keyword in broad_keywords)
+
+def _is_etf_feeder_text(text):
+    text = str(text or '').upper()
+    keywords = ['ETF联接', 'ETF连接', 'ETF链接', '联接基金', '联接A', '联接C', 'ETF FEEDER']
+    return any(keyword.upper() in text for keyword in keywords)
+
+def _topic_from_fund_text(text):
+    text = str(text or '').upper()
+    topic_rules = [
+        ('半导体', ['半导体', '芯片', '集成电路', 'CHIP', 'SEMICONDUCTOR']),
+        ('证券', ['证券', '券商', '证券公司', '证券保险']),
+        ('银行', ['银行', 'BANK']),
+        ('保险', ['保险']),
+        ('医药', ['医药', '医疗', '生物医药', '创新药', '医疗器械', 'HEALTH', 'PHARMA']),
+        ('消费', ['消费', '食品饮料', '主要消费', '可选消费', '酒', '白酒', '家电']),
+        ('新能源', ['新能源', '新能源汽车', '新能源车', '光伏', '太阳能', '储能', '电池', '锂电']),
+        ('军工', ['军工', '国防', '航天', '航空']),
+        ('人工智能', ['人工智能', 'AI', '机器人', '智能']),
+        ('计算机', ['计算机', '软件', '云计算', '大数据', '互联网']),
+        ('通信', ['通信', '5G', '通讯']),
+        ('电子', ['电子', '消费电子']),
+        ('传媒', ['传媒', '游戏', '动漫']),
+        ('房地产', ['房地产', '地产']),
+        ('有色金属', ['有色', '有色金属', '稀土', '黄金', '贵金属']),
+        ('煤炭', ['煤炭']),
+        ('钢铁', ['钢铁']),
+        ('化工', ['化工', '化学']),
+        ('农业', ['农业', '农牧', '畜牧', '养殖']),
+        ('红利', ['红利', '股息', '高息']),
+    ]
+    for topic, keywords in topic_rules:
+        if any(keyword.upper() in text for keyword in keywords):
+            return topic
+    return None
+
+def _fund_text_industry_fallback(text):
+    if _is_broad_index_fund_text(text):
+        return {
+            'name': '宽基指数',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'broad_index_name',
+            'source': 'fund_name_rule',
+        }
+    topic = _topic_from_fund_text(text)
+    if topic:
+        return {
+            'name': topic,
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'fund_name_topic',
+            'source': 'fund_name_rule',
+        }
+    if _is_etf_feeder_text(text):
+        return {
+            'name': '指数联接',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'etf_feeder_name',
+            'source': 'fund_name_rule',
+        }
+    return None
+
+def _upsert_stock_industry(db: Session, stock_data: dict):
+    code = _normalize_stock_code(stock_data.get('code'))
+    if not code:
+        return None
+
+    record = db.query(StockIndustry).filter(StockIndustry.stock_code == code).first()
+    if not record:
+        record = StockIndustry(stock_code=code)
+        db.add(record)
+
+    concepts = stock_data.get('concepts')
+    if not isinstance(concepts, list):
+        concepts = []
+
+    record.stock_name = stock_data.get('name') or record.stock_name
+    record.industry = stock_data.get('industry') or record.industry
+    record.region = stock_data.get('region') or record.region
+    record.concepts_json = _json_dumps(concepts)
+    record.source = stock_data.get('source') or 'data_service'
+    record.updated_time = datetime.now()
+    return record
+
+def _stock_industry_payload(record):
+    return {
+        'stock_code': record.stock_code,
+        'stock_name': record.stock_name,
+        'industry': record.industry,
+        'region': record.region,
+        'concepts': _json_loads(record.concepts_json, []),
+        'source': record.source,
+        'updated_time': record.updated_time.isoformat() if record.updated_time else None,
+    }
+
+def _fetch_stock_industry_batch(db: Session, codes, force_refresh=False, timeout=None):
+    normalized_codes = []
+    for code in codes or []:
+        normalized = _normalize_stock_code(code)
+        if normalized and re.match(r'^\d{5,6}$', normalized) and normalized not in normalized_codes:
+            normalized_codes.append(normalized)
+
+    if not normalized_codes:
+        return {}, []
+
+    industry_map = {}
+    failed_codes = []
+    chunk_size = 100
+    client = DataServiceClient(timeout=timeout if timeout is not None else (8.0 if force_refresh else 4.0))
+    for index in range(0, len(normalized_codes), chunk_size):
+        chunk = normalized_codes[index:index + chunk_size]
+        try:
+            payload = client.get_stock_references(chunk)
+            ds_data = payload.get('data', {}) if isinstance(payload, dict) else {}
+            ds_items = ds_data.get('items', []) if isinstance(ds_data, dict) else []
+            success_codes = set()
+            for result in ds_items:
+                if not isinstance(result, dict) or not result.get('success'):
+                    continue
+                stock_data = result.get('data') if isinstance(result.get('data'), dict) else {}
+                record = _upsert_stock_industry(db, stock_data)
+                if record:
+                    industry_map[record.stock_code] = _stock_industry_payload(record)
+                    success_codes.add(record.stock_code)
+            failed_codes.extend(code for code in chunk if code not in success_codes)
+        except DataServiceError as exc:
+            print(f"stock industry dictionary: DataService unavailable for {len(chunk)} codes: {exc}")
+            failed_codes.extend(chunk)
+        except Exception as exc:
+            print(f"stock industry dictionary: unexpected error for {len(chunk)} codes: {exc}")
+            failed_codes.extend(chunk)
+
+    return industry_map, failed_codes
+
+def _resolve_stock_industries(db: Session, holdings, force_refresh=False, allow_network=False):
+    items = _portfolio_holding_items(holdings)
+    codes = []
+    for item in items:
+        code = _normalize_stock_code(item.get('code'))
+        if code and code not in codes:
+            codes.append(code)
+
+    if not codes:
+        return {}, []
+
+    records = db.query(StockIndustry).filter(StockIndustry.stock_code.in_(codes)).all()
+    industry_map = {record.stock_code: _stock_industry_payload(record) for record in records}
+
+    for code in codes:
+        if code in industry_map and industry_map[code].get('industry'):
+            continue
+        if not _is_us_stock_code(code):
+            continue
+        record = db.query(StockIndustry).filter(StockIndustry.stock_code == code).first()
+        if not record:
+            record = StockIndustry(stock_code=code)
+            db.add(record)
+        record.stock_name = record.stock_name or code
+        record.industry = '美股'
+        record.region = 'US'
+        record.source = 'rule.us_ticker'
+        record.updated_time = datetime.now()
+        industry_map[code] = _stock_industry_payload(record)
+
+    missing_codes = codes if force_refresh else [
+        code for code in codes
+        if code not in industry_map or not industry_map[code].get('industry')
+    ]
+
+    if allow_network and missing_codes:
+        fetched_map, _ = _fetch_stock_industry_batch(
+            db,
+            missing_codes,
+            force_refresh=force_refresh,
+        )
+        industry_map.update(fetched_map)
+
+    unresolved = [code for code in codes if not industry_map.get(code, {}).get('industry')]
+    return industry_map, unresolved
+
+def _enhance_portfolio_industries(db: Session, portfolio: dict, force_refresh=False):
+    if not isinstance(portfolio, dict):
+        return portfolio
+
+    target_keys = ['stock_codes_new', 'stock_codes']
+    all_holdings = []
+    for key in target_keys:
+        all_holdings.extend(_portfolio_holding_items(portfolio.get(key)))
+
+    industry_map, unresolved = _resolve_stock_industries(
+        db,
+        all_holdings,
+        force_refresh=force_refresh,
+        allow_network=force_refresh,
+    )
+
+    for key in target_keys:
+        items = _portfolio_holding_items(portfolio.get(key))
+        if not items:
+            continue
+        enhanced = []
+        for item in items:
+            info = industry_map.get(item.get('code'), {})
+            enhanced.append({
+                **item,
+                'industry': info.get('industry'),
+                'region': info.get('region'),
+                'concepts': info.get('concepts') or [],
+            })
+        portfolio[key] = enhanced
+
+    portfolio['industry_unresolved_codes'] = unresolved
+    portfolio['industry_tag'] = _build_portfolio_industry_tag(portfolio)
+    return portfolio
+
+def _build_portfolio_industry_tag(portfolio: dict):
+    if not isinstance(portfolio, dict):
+        return None
+
+    fund_text = _fund_name_or_type_text(portfolio)
+    if _is_broad_index_fund_text(fund_text):
+        return {
+            'name': '宽基指数',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'broad_index_name',
+            'source': 'fund_name_rule',
+        }
+    topic = _topic_from_fund_text(fund_text)
+    if topic:
+        return {
+            'name': topic,
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'fund_name_topic',
+            'source': 'fund_name_rule',
+        }
+    if _is_etf_feeder_text(fund_text):
+        return {
+            'name': '????',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'etf_feeder_name',
+            'source': 'fund_name_rule',
+        }
+
+    holdings = _portfolio_holding_items(portfolio.get('stock_codes_new')) or _portfolio_holding_items(portfolio.get('stock_codes'))
+    buckets = {}
+    total_ratio = 0.0
+    for item in holdings:
+        industry = item.get('industry') or item.get('industry_name') or item.get('industryName') or item.get('sector') or item.get('sector_name')
+        if not industry:
+            continue
+        ratio = _safe_ratio(item.get('ratio'))
+        total_ratio += ratio
+        bucket = buckets.setdefault(industry, {
+            'name': industry,
+            'ratio': 0.0,
+            'count': 0,
+            'stocks': [],
+        })
+        bucket['ratio'] += ratio
+        bucket['count'] += 1
+        bucket['stocks'].append({
+            'code': item.get('code'),
+            'name': item.get('name'),
+            'ratio': ratio,
+        })
+
+    if not buckets:
+        return {
+            'name': '混合型',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'mixed',
+            'source': 'top_stock_holdings',
+        }
+
+    top = sorted(
+        buckets.values(),
+        key=lambda item: (item['ratio'], item['count']),
+        reverse=True,
+    )[0]
+
+    valid_count = sum(item['count'] for item in buckets.values())
+    top_share = (top['ratio'] / total_ratio * 100) if total_ratio > 0 else 0.0
+
+    if top['count'] < 3 or top_share < 45:
+        return {
+            'name': '混合型',
+            'ratio': round(top['ratio'], 2),
+            'count': top['count'],
+            'basis': 'mixed',
+            'source': 'top_stock_holdings',
+            'top_share': round(top_share, 2),
+            'valid_count': valid_count,
+        }
+
+    return {
+        'name': top['name'],
+        'ratio': round(top['ratio'], 2),
+        'count': top['count'],
+        'basis': 'concentration' if total_ratio > 0 else 'count',
+        'source': 'top_stock_holdings',
+        'top_share': round(top_share, 2),
+        'valid_count': valid_count,
+    }
+
+def _build_portfolio_industry_tag(portfolio: dict):
+    if not isinstance(portfolio, dict):
+        return None
+
+    fund_text = _fund_name_or_type_text(portfolio)
+    fallback_tag = _fund_text_industry_fallback(fund_text)
+    holdings = _portfolio_holding_items(portfolio.get('stock_codes_new')) or _portfolio_holding_items(portfolio.get('stock_codes'))
+
+    if not holdings:
+        return fallback_tag or {
+            'name': '混合型',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'missing_holdings',
+            'source': 'top_stock_holdings',
+        }
+
+    buckets = {}
+    total_ratio = 0.0
+    for item in holdings:
+        industry = (
+            item.get('industry')
+            or item.get('industry_name')
+            or item.get('industryName')
+            or item.get('sector')
+            or item.get('sector_name')
+        )
+        if not industry and _is_us_stock_code(item.get('code')):
+            industry = '美股'
+        if not industry:
+            continue
+
+        ratio = _safe_ratio(item.get('ratio'))
+        total_ratio += ratio
+        bucket = buckets.setdefault(industry, {
+            'name': industry,
+            'ratio': 0.0,
+            'count': 0,
+            'stocks': [],
+        })
+        bucket['ratio'] += ratio
+        bucket['count'] += 1
+        bucket['stocks'].append({
+            'code': item.get('code'),
+            'name': item.get('name'),
+            'ratio': ratio,
+        })
+
+    if not buckets:
+        return fallback_tag or {
+            'name': '混合型',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'mixed',
+            'source': 'top_stock_holdings',
+        }
+
+    top = sorted(
+        buckets.values(),
+        key=lambda item: (item['ratio'], item['count']),
+        reverse=True,
+    )[0]
+
+    valid_count = sum(item['count'] for item in buckets.values())
+    top_share = (
+        (top['ratio'] / total_ratio * 100)
+        if total_ratio > 0
+        else (top['count'] / valid_count * 100 if valid_count else 0.0)
+    )
+    is_us_dominant = top['name'] == '美股' and (top_share >= 45 or top['count'] >= 3)
+    is_industry_concentrated = top['count'] >= 3 and top_share >= 45
+
+    if is_us_dominant or is_industry_concentrated:
+        return {
+            'name': top['name'],
+            'ratio': round(top['ratio'], 2),
+            'count': top['count'],
+            'basis': 'us_holdings' if top['name'] == '美股' else 'concentration',
+            'source': 'top_stock_holdings',
+            'top_share': round(top_share, 2),
+            'valid_count': valid_count,
+        }
+
+    if fallback_tag:
+        fallback = dict(fallback_tag)
+        fallback.update({
+            'ratio': round(top['ratio'], 2),
+            'count': top['count'],
+            'top_share': round(top_share, 2),
+            'valid_count': valid_count,
+            'holding_top_industry': top['name'],
+        })
+        return fallback
+
+    return {
+        'name': '混合型',
+        'ratio': round(top['ratio'], 2),
+        'count': top['count'],
+        'basis': 'mixed',
+        'source': 'top_stock_holdings',
+        'top_share': round(top_share, 2),
+        'valid_count': valid_count,
+    }
+
+def _build_industry_tag_from_cached_holdings(raw_holdings, industry_lookup, fund_name=None, fund_type=None):
+    holdings = _portfolio_holding_items(raw_holdings)
+    enhanced = []
+    for item in holdings:
+        info = industry_lookup.get(item.get('code'), {})
+        enhanced.append({
+            **item,
+            'industry': info.get('industry'),
+        })
+    return _build_portfolio_industry_tag({
+        'stock_codes_new': enhanced,
+        'fund_name': fund_name,
+        'fund_type': fund_type,
+    })
+
+def _upsert_fund_industry_tag(db: Session, fund_code: str, tag: dict, detail=None, unresolved_count=0):
+    fund_code = _normalize_fund_code(fund_code)
+    if not fund_code or not tag:
+        return None
+
+    record = db.query(FundIndustryTag).filter(FundIndustryTag.fund_code == fund_code).first()
+    if not record:
+        record = FundIndustryTag(fund_code=fund_code)
+        db.add(record)
+
+    record.industry_tag = tag.get('name') or '混合型'
+    record.industry_count = int(tag.get('count') or 0)
+    record.industry_ratio = _safe_ratio(tag.get('ratio'))
+    record.basis = tag.get('basis') or 'mixed'
+    record.source = tag.get('source') or 'top_stock_holdings'
+    record.detail_json = _json_dumps(detail or {})
+    record.unresolved_count = int(unresolved_count or 0)
+    record.updated_time = datetime.now()
+    return record
+
+def _upsert_fund_industry_tag(db: Session, fund_code: str, tag: dict, detail=None, unresolved_count=0):
+    fund_code = _normalize_fund_code(fund_code)
+    if not fund_code or not tag:
+        return None
+
+    record = db.query(FundIndustryTag).filter(FundIndustryTag.fund_code == fund_code).first()
+    if not record:
+        record = FundIndustryTag(fund_code=fund_code)
+        db.add(record)
+
+    record.industry_tag = tag.get('name') or '混合型'
+    record.industry_count = int(tag.get('count') or 0)
+    record.industry_ratio = _safe_ratio(tag.get('ratio'))
+    record.basis = tag.get('basis') or 'mixed'
+    record.source = tag.get('source') or 'top_stock_holdings'
+    record.detail_json = _json_dumps(detail or {})
+    record.unresolved_count = int(unresolved_count or 0)
+    record.updated_time = datetime.now()
+    return record
+
+def _save_portfolio_from_holdings_payload(db: Session, fund_code: str, payload: dict):
+    data = payload.get('data', {}) if isinstance(payload, dict) else {}
+    items = data.get('items', []) if isinstance(data, dict) else []
+    if not isinstance(items, list) or not items:
+        return None
+
+    stock_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code = _normalize_stock_code(item.get('stockCode') or item.get('code'))
+        if not code:
+            continue
+        ratio = item.get('ratio')
+        if isinstance(ratio, (int, float)) and 0 < ratio <= 1:
+            ratio = round(ratio * 100, 4)
+        stock_items.append({
+            'code': code,
+            'name': item.get('stockName') or item.get('name') or code,
+            'market': item.get('market'),
+            'ratio': ratio,
+        })
+
+    if not stock_items:
+        return None
+
+    fund_code = _normalize_fund_code(fund_code)
+    record = db.query(FundPortfolio).filter(FundPortfolio.fund_code == fund_code).first()
+    if not record:
+        record = FundPortfolio(fund_code=fund_code)
+        db.add(record)
+
+    record.stock_codes_json = _json_dumps(stock_items)
+    record.stock_codes_new_json = _json_dumps(stock_items)
+    record.bond_codes_json = _json_dumps(data.get('bondCodes', []) if isinstance(data, dict) else [])
+    record.bond_codes_new_json = _json_dumps(data.get('bondCodesNew', []) if isinstance(data, dict) else [])
+    record.updated_time = datetime.now()
+    return record
+
+def _refresh_fund_industry_tag(db: Session, fund_code: str, fetch_holdings_if_missing=False, force_stock_refresh=False, allow_stock_network=False):
+    fund_code = _normalize_fund_code(fund_code)
+    if not fund_code:
+        return None
+
+    portfolio = db.query(FundPortfolio).filter(FundPortfolio.fund_code == fund_code).first()
+    if not portfolio and fetch_holdings_if_missing:
+        try:
+            payload = get_data_service_client().get_fund_holdings(fund_code)
+            portfolio = _save_portfolio_from_holdings_payload(db, fund_code, payload)
+        except Exception as exc:
+            print(f"fund industry tag: holdings fetch failed for {fund_code}: {exc}")
+
+    if not portfolio:
+        tag = {
+            'name': '混合型',
+            'ratio': 0.0,
+            'count': 0,
+            'basis': 'missing_holdings',
+            'source': 'top_stock_holdings',
+        }
+        return _upsert_fund_industry_tag(db, fund_code, tag, detail={'reason': 'missing_holdings'}, unresolved_count=0)
+
+    raw_holdings = _json_loads(portfolio.stock_codes_new_json, []) or _json_loads(portfolio.stock_codes_json, [])
+    holding_items = _portfolio_holding_items(raw_holdings)
+    industry_map, unresolved = _resolve_stock_industries(
+        db,
+        holding_items,
+        force_refresh=force_stock_refresh,
+        allow_network=allow_stock_network or force_stock_refresh,
+    )
+
+    enhanced = []
+    for item in holding_items:
+        info = industry_map.get(item.get('code'), {})
+        enhanced.append({
+            **item,
+            'industry': info.get('industry'),
+            'region': info.get('region'),
+            'concepts': info.get('concepts') or [],
+        })
+
+    basic = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == fund_code).first()
+    tag = _build_portfolio_industry_tag({
+        'stock_codes_new': enhanced,
+        'fund_name': basic.fund_name if basic else None,
+        'fund_type': basic.fund_type if basic else None,
+    })
+    industry_counts = {}
+    for item in enhanced:
+        industry = item.get('industry')
+        if not industry:
+            continue
+        bucket = industry_counts.setdefault(industry, {'count': 0, 'ratio': 0.0})
+        bucket['count'] += 1
+        bucket['ratio'] += _safe_ratio(item.get('ratio'))
+
+    return _upsert_fund_industry_tag(
+        db,
+        fund_code,
+        tag,
+        detail={'industries': industry_counts},
+        unresolved_count=len(unresolved),
+    )
+
+def _stats_numbers(values):
+    nums = []
+    for value in values:
+        num = _to_float(value)
+        if num is not None:
+            nums.append(num)
+    nums.sort()
+    if not nums:
+        return {
+            'avg': None,
+            'median': None,
+            'positive_rate': None,
+            'count': 0,
+        }
+    mid = len(nums) // 2
+    median = nums[mid] if len(nums) % 2 else (nums[mid - 1] + nums[mid]) / 2
+    return {
+        'avg': round(sum(nums) / len(nums), 2),
+        'median': round(median, 2),
+        'positive_rate': round(sum(1 for num in nums if num > 0) / len(nums) * 100, 2),
+        'count': len(nums),
+    }
+
+def rebuild_industry_performance_stats(db: Session):
+    rows = db.query(FundIndustryTag, FundBasicInfo).join(
+        FundBasicInfo, FundIndustryTag.fund_code == FundBasicInfo.fund_code
+    ).all()
+
+    grouped = {}
+    for tag, basic in rows:
+        industry = tag.industry_tag or '混合型'
+        perf = _json_loads(basic.performance_json, {}) if basic else {}
+        bucket = grouped.setdefault(industry, {
+            'funds': [],
+            'return_3m': [],
+            'return_6m': [],
+            'return_1y': [],
+            'return_3y': [],
+        })
+        bucket['funds'].append({
+            'fund_code': basic.fund_code,
+            'fund_name': basic.fund_name,
+            'fund_type': basic.fund_type,
+        })
+        bucket['return_3m'].append(perf.get('3_month_return'))
+        bucket['return_6m'].append(perf.get('6_month_return'))
+        bucket['return_1y'].append(perf.get('1_year_return'))
+        bucket['return_3y'].append(perf.get('3_year_return'))
+
+    existing = {
+        row.industry_tag: row
+        for row in db.query(FundIndustryPerformance).all()
+    }
+
+    touched = set()
+    for industry, bucket in grouped.items():
+        stat_3m = _stats_numbers(bucket['return_3m'])
+        stat_6m = _stats_numbers(bucket['return_6m'])
+        stat_1y = _stats_numbers(bucket['return_1y'])
+        stat_3y = _stats_numbers(bucket['return_3y'])
+
+        record = existing.get(industry)
+        if not record:
+            record = FundIndustryPerformance(industry_tag=industry)
+            db.add(record)
+
+        record.fund_count = len(bucket['funds'])
+        record.return_3m_avg = stat_3m['avg']
+        record.return_3m_median = stat_3m['median']
+        record.return_6m_avg = stat_6m['avg']
+        record.return_6m_median = stat_6m['median']
+        record.return_1y_avg = stat_1y['avg']
+        record.return_1y_median = stat_1y['median']
+        record.return_3y_avg = stat_3y['avg']
+        record.return_3y_median = stat_3y['median']
+        record.positive_3m_rate = stat_3m['positive_rate']
+        record.positive_6m_rate = stat_6m['positive_rate']
+        record.positive_1y_rate = stat_1y['positive_rate']
+        record.positive_3y_rate = stat_3y['positive_rate']
+        record.detail_json = _json_dumps({
+            'period_counts': {
+                '3m': stat_3m['count'],
+                '6m': stat_6m['count'],
+                '1y': stat_1y['count'],
+                '3y': stat_3y['count'],
+            },
+            'funds': bucket['funds'][:50],
+        })
+        record.updated_time = datetime.now()
+        touched.add(industry)
+
+    for industry, record in existing.items():
+        if industry not in touched:
+            db.delete(record)
+
+    return len(touched)
+
+def _industry_performance_payload(db: Session):
+    rows = db.query(FundIndustryPerformance).order_by(
+        desc(FundIndustryPerformance.return_3m_median)
+    ).all()
+    items = []
+    for row in rows:
+        detail = _json_loads(row.detail_json, {})
+        items.append({
+            'industry': row.industry_tag,
+            'fund_count': row.fund_count,
+            'return_3m_avg': row.return_3m_avg,
+            'return_3m_median': row.return_3m_median,
+            'return_6m_avg': row.return_6m_avg,
+            'return_6m_median': row.return_6m_median,
+            'return_1y_avg': row.return_1y_avg,
+            'return_1y_median': row.return_1y_median,
+            'return_3y_avg': row.return_3y_avg,
+            'return_3y_median': row.return_3y_median,
+            'positive_3m_rate': row.positive_3m_rate,
+            'positive_6m_rate': row.positive_6m_rate,
+            'positive_1y_rate': row.positive_1y_rate,
+            'positive_3y_rate': row.positive_3y_rate,
+            'period_counts': detail.get('period_counts', {}) if isinstance(detail, dict) else {},
+            'updated_time': row.updated_time.isoformat() if row.updated_time else None,
+        })
+
+    return {
+        'items': items,
+        'summary': {
+            'total': len(items),
+            'fund_count': sum(item.get('fund_count') or 0 for item in items),
+            'updated_time': max((item.get('updated_time') for item in items if item.get('updated_time')), default=None),
+        },
+        'top_3m': sorted(items, key=lambda item: item.get('return_3m_median') if item.get('return_3m_median') is not None else -9999, reverse=True)[:8],
+        'top_1y': sorted(items, key=lambda item: item.get('return_1y_median') if item.get('return_1y_median') is not None else -9999, reverse=True)[:8],
+        'weak_3m': sorted(items, key=lambda item: item.get('return_3m_median') if item.get('return_3m_median') is not None else 9999)[:8],
+    }
+
+def _screening_industry_context(db: Session, fund_codes):
+    codes = [str(code) for code in fund_codes if code]
+    if not codes:
+        return {}
+
+    persisted = db.query(FundIndustryTag).filter(FundIndustryTag.fund_code.in_(codes)).all()
+    tag_map = {
+        item.fund_code: {
+            'name': item.industry_tag,
+            'ratio': item.industry_ratio,
+            'count': item.industry_count,
+            'basis': item.basis,
+            'source': item.source,
+        }
+        for item in persisted
+    }
+    missing_codes = [code for code in codes if code not in tag_map]
+    if not missing_codes:
+        return tag_map
+
+    portfolios = db.query(FundPortfolio).filter(FundPortfolio.fund_code.in_(missing_codes)).all()
+    portfolio_map = {item.fund_code: item for item in portfolios}
+
+    stock_codes = set()
+    for portfolio in portfolios:
+        raw_holdings = _json_loads(portfolio.stock_codes_new_json, []) or _json_loads(portfolio.stock_codes_json, [])
+        for item in _portfolio_holding_items(raw_holdings):
+            code = item.get('code')
+            if code:
+                stock_codes.add(code)
+
+    industry_lookup = {}
+    if stock_codes:
+        records = db.query(StockIndustry).filter(StockIndustry.stock_code.in_(stock_codes)).all()
+        industry_lookup = {
+            record.stock_code: {
+                'industry': record.industry,
+                'stock_name': record.stock_name,
+            }
+            for record in records
+        }
+
+    for fund_code, portfolio in portfolio_map.items():
+        raw_holdings = _json_loads(portfolio.stock_codes_new_json, []) or _json_loads(portfolio.stock_codes_json, [])
+        basic = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == fund_code).first()
+        tag = _build_industry_tag_from_cached_holdings(
+            raw_holdings,
+            industry_lookup,
+            fund_name=basic.fund_name if basic else None,
+            fund_type=basic.fund_type if basic else None,
+        )
+        tag_map[fund_code] = tag
+        _upsert_fund_industry_tag(db, fund_code, tag, detail={'source': 'screening_cache_backfill'})
+    return tag_map
+
+def _build_fund_industry_exposure(db: Session, fund_code: str, force_refresh=False):
+    fund_code = _normalize_fund_code(fund_code)
+    portfolio = db.query(FundPortfolio).filter(FundPortfolio.fund_code == fund_code).first()
+    if not portfolio:
+        return None
+
+    holdings = _json_loads(portfolio.stock_codes_new_json, []) or _json_loads(portfolio.stock_codes_json, [])
+    holding_items = _portfolio_holding_items(holdings)
+    industry_map, unresolved = _resolve_stock_industries(
+        db,
+        holding_items,
+        force_refresh=force_refresh,
+        allow_network=force_refresh,
+    )
+
+    exposure = {}
+    enriched_holdings = []
+    for item in holding_items:
+        code = item.get('code')
+        info = industry_map.get(code, {})
+        industry = info.get('industry') or '未识别'
+        ratio = _safe_ratio(item.get('ratio'))
+        enriched_item = {
+            **item,
+            'industry': info.get('industry'),
+            'region': info.get('region'),
+            'concepts': info.get('concepts') or [],
+        }
+        enriched_holdings.append(enriched_item)
+        if not info.get('industry'):
+            industry = '未识别'
+
+        bucket = exposure.setdefault(industry, {
+            'industry': industry,
+            'ratio': 0.0,
+            'count': 0,
+            'stocks': [],
+        })
+        bucket['ratio'] += ratio
+        bucket['count'] += 1
+        bucket['stocks'].append({
+            'code': code,
+            'name': item.get('name'),
+            'ratio': ratio,
+        })
+
+    exposure_items = sorted(exposure.values(), key=lambda item: (item['ratio'], item['count']), reverse=True)
+    for item in exposure_items:
+        item['ratio'] = round(item['ratio'], 2)
+
+    basic = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == fund_code).first()
+    result = {
+        'fund_code': fund_code,
+        'holdings': enriched_holdings,
+        'industries': exposure_items,
+        'industry_tag': _build_portfolio_industry_tag({
+            'stock_codes_new': enriched_holdings,
+            'fund_name': basic.fund_name if basic else fund_code,
+            'fund_type': basic.fund_type if basic else None,
+        }),
+        'unresolved_codes': unresolved,
+        'updated_time': datetime.now().isoformat(),
+    }
+    _upsert_fund_industry_tag(
+        db,
+        fund_code,
+        result['industry_tag'],
+        detail={'industries': exposure_items},
+        unresolved_count=len(unresolved),
+    )
+    return result
+
 def _normalize_fund_code(code):
     code = str(code or '').strip()
     return code.zfill(6) if re.match(r'^\d{1,6}$', code) else code
@@ -186,12 +1144,20 @@ def _build_cached_response(db: Session, fund_code: str):
         }
 
     if portfolio:
-        data['portfolio'] = {
+        data['portfolio'] = _enhance_portfolio_industries(db, {
             'stock_codes': _json_loads(portfolio.stock_codes_json, []),
             'bond_codes': _json_loads(portfolio.bond_codes_json, []),
             'stock_codes_new': _json_loads(portfolio.stock_codes_new_json, []),
             'bond_codes_new': _json_loads(portfolio.bond_codes_new_json, [])
-        }
+        })
+        data['fund_industry_tag'] = data['portfolio'].get('industry_tag')
+        _upsert_fund_industry_tag(
+            db,
+            fund_code,
+            data['fund_industry_tag'],
+            detail={'source': 'cached_response'},
+            unresolved_count=len(data['portfolio'].get('industry_unresolved_codes') or []),
+        )
 
     if extra:
         data['holder_structure'] = _json_loads(extra.holder_structure_json, {})
@@ -412,6 +1378,16 @@ def get_fund_detail(fund_code):
         }
         estimate = fund_data.get('realtime_estimate', {})
         portfolio = fund_data.get('portfolio', {})
+        portfolio = _enhance_portfolio_industries(db, portfolio)
+        fund_data['portfolio'] = portfolio
+        fund_data['fund_industry_tag'] = portfolio.get('industry_tag')
+        _upsert_fund_industry_tag(
+            db,
+            fund_code,
+            fund_data['fund_industry_tag'],
+            detail={'source': 'fund_detail'},
+            unresolved_count=len(portfolio.get('industry_unresolved_codes') or []),
+        )
         extra = {
             'holder_structure': fund_data.get('holder_structure', {}),
             'asset_allocation': fund_data.get('asset_allocation', {}),
@@ -458,24 +1434,41 @@ def get_fund_detail(fund_code):
             db.add(basic_record)
 
         trend_record = db.query(FundTrend).filter(FundTrend.fund_code == fund_code).first()
+        # Only overwrite cached net_worth_trend if fresh data is non-empty
+        # Prevents API glitches from wiping valid cached data
+        fresh_nwt = trend['net_worth_trend']
+        fresh_acw = trend['accumulated_net_worth']
+        fresh_pos = trend['position_trend']
+        fresh_total_ret = trend['total_return_trend']
+        fresh_rank = trend['ranking_trend']
+        fresh_rank_pct = trend['ranking_percentage']
+        fresh_scale = trend['scale_fluctuation']
+
         if trend_record:
-            trend_record.net_worth_trend_json = _json_dumps(trend['net_worth_trend'])
-            trend_record.accumulated_net_worth_json = _json_dumps(trend['accumulated_net_worth'])
-            trend_record.position_trend_json = _json_dumps(trend['position_trend'])
-            trend_record.total_return_trend_json = _json_dumps(trend['total_return_trend'])
-            trend_record.ranking_trend_json = _json_dumps(trend['ranking_trend'])
-            trend_record.ranking_percentage_json = _json_dumps(trend['ranking_percentage'])
-            trend_record.scale_fluctuation_json = _json_dumps(trend['scale_fluctuation'])
+            if fresh_nwt:
+                trend_record.net_worth_trend_json = _json_dumps(fresh_nwt)
+            if fresh_acw:
+                trend_record.accumulated_net_worth_json = _json_dumps(fresh_acw)
+            if fresh_pos:
+                trend_record.position_trend_json = _json_dumps(fresh_pos)
+            if fresh_total_ret:
+                trend_record.total_return_trend_json = _json_dumps(fresh_total_ret)
+            if fresh_rank:
+                trend_record.ranking_trend_json = _json_dumps(fresh_rank)
+            if fresh_rank_pct:
+                trend_record.ranking_percentage_json = _json_dumps(fresh_rank_pct)
+            if fresh_scale:
+                trend_record.scale_fluctuation_json = _json_dumps(fresh_scale)
         else:
             trend_record = FundTrend(
                 fund_code=fund_code,
-                net_worth_trend_json=_json_dumps(trend['net_worth_trend']),
-                accumulated_net_worth_json=_json_dumps(trend['accumulated_net_worth']),
-                position_trend_json=_json_dumps(trend['position_trend']),
-                total_return_trend_json=_json_dumps(trend['total_return_trend']),
-                ranking_trend_json=_json_dumps(trend['ranking_trend']),
-                ranking_percentage_json=_json_dumps(trend['ranking_percentage']),
-                scale_fluctuation_json=_json_dumps(trend['scale_fluctuation'])
+                net_worth_trend_json=_json_dumps(fresh_nwt),
+                accumulated_net_worth_json=_json_dumps(fresh_acw),
+                position_trend_json=_json_dumps(fresh_pos),
+                total_return_trend_json=_json_dumps(fresh_total_ret),
+                ranking_trend_json=_json_dumps(fresh_rank),
+                ranking_percentage_json=_json_dumps(fresh_rank_pct),
+                scale_fluctuation_json=_json_dumps(fresh_scale)
             )
             db.add(trend_record)
 
@@ -565,9 +1558,37 @@ def get_fund_detail(fund_code):
     # 如果API获取失败，尝试从数据库获取缓存数据作为兜底
     cached_data = _build_cached_response(db, fund_code)
     if cached_data:
+        try:
+            db.commit()
+        except Exception as exc:
+            print(f"cached fund industry commit failed: {exc}")
+            db.rollback()
         return jsonify(cached_data)
 
     return jsonify({"error": "Fund not found"}), 404
+
+@app.route('/api/fund/<fund_code>/industry-exposure', methods=['GET'])
+def get_fund_industry_exposure(fund_code):
+    """Return industry exposure inferred from a fund's top stock holdings."""
+    db = get_db()
+    force_refresh = request.args.get('refresh', '').lower() in ('1', 'true', 'yes')
+    result = _build_fund_industry_exposure(db, fund_code, force_refresh=force_refresh)
+    if result is None:
+        return jsonify({
+            "success": False,
+            "error": "No portfolio data found for this fund. Open the fund detail once to fetch holdings first.",
+        }), 404
+
+    try:
+        db.commit()
+    except Exception as exc:
+        print(f"industry exposure commit failed: {exc}")
+        db.rollback()
+
+    return jsonify({
+        "success": True,
+        "data": result,
+    })
 
 @app.route('/api/stock/<code>/quote', methods=['GET'])
 def get_stock_quote(code):
@@ -784,6 +1805,7 @@ def get_watchlist():
 
         net_worth = estimate.net_worth if estimate else None
         net_worth_date = estimate.net_worth_date if estimate else None
+        display_change = estimate.estimate_change if estimate else None
 
         # 兜底：FundTrend 存储 pingzhongdata 的净值走势 JSON，
         # 解析取最新净值，如果比 FundEstimate (fundgz) 更新就覆盖
@@ -797,9 +1819,12 @@ def get_watchlist():
                         t_nw = last.get('net_worth')
                         t_date = last.get('date')
                         if t_nw is not None and t_date is not None:
-                            if not net_worth_date or str(t_date) > str(net_worth_date):
+                            trend_change = _trend_daily_return(trend_data)
+                            if not net_worth_date or str(t_date) >= str(net_worth_date):
                                 net_worth = str(t_nw)
                                 net_worth_date = str(t_date)
+                                if trend_change is not None:
+                                    display_change = _value_to_string(trend_change)
         except Exception:
             pass
 
@@ -813,7 +1838,7 @@ def get_watchlist():
             'net_worth': net_worth,
             'net_worth_date': net_worth_date,
             'estimate_value': estimate.estimate_value if estimate else None,
-            'estimate_change': estimate.estimate_change if estimate else None,
+            'estimate_change': display_change,
             'estimate_time': estimate.estimate_time if estimate else None
         }
         funds_data.append(fund_data)
@@ -1164,6 +2189,126 @@ def _upsert_data_service_estimate(db, fund_code, estimate_data):
     )
 
 
+def _latest_nav_from_data_service(fund_code):
+    payload = get_data_service_client().get_fund_nav_history(fund_code)
+    items = _nav_history_payload_items(payload)
+    latest = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        date = item.get('date')
+        nav = item.get('nav')
+        if not date or nav is None:
+            continue
+        if latest is None or str(date) > str(latest.get('date')):
+            latest = item
+    if not latest:
+        return None
+    return {
+        'date': str(latest.get('date')),
+        'nav': latest.get('nav'),
+        'daily_return': latest.get('dailyReturn'),
+    }
+
+
+def _first_present(mapping, keys):
+    for key in keys:
+        if isinstance(mapping, dict) and key in mapping and mapping.get(key) is not None:
+            return mapping.get(key)
+    return None
+
+
+def _trend_daily_return(rows):
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    normalized = [
+        row for row in rows
+        if isinstance(row, dict) and row.get('date') is not None and row.get('net_worth') is not None
+    ]
+    if not normalized:
+        return None
+
+    normalized.sort(key=lambda item: str(item.get('date') or ''))
+    latest = normalized[-1]
+    daily_return = _first_present(latest, ('dailyReturn', 'equityReturn', 'growth_rate'))
+    if daily_return is not None:
+        return daily_return
+
+    if len(normalized) >= 2:
+        try:
+            prev_nav = float(normalized[-2].get('net_worth'))
+            curr_nav = float(latest.get('net_worth'))
+            if prev_nav:
+                return round((curr_nav - prev_nav) / prev_nav * 100, 4)
+        except Exception:
+            return None
+    return None
+
+
+def _latest_nav_from_fund_trend(db, fund_code):
+    trend = db.query(FundTrend).filter(FundTrend.fund_code == fund_code).first()
+    rows = _json_loads(trend.net_worth_trend_json, []) if trend else []
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date = row.get('date')
+        nav = row.get('net_worth')
+        if date is None or nav is None:
+            continue
+        normalized.append(row)
+    if not normalized:
+        return None
+
+    normalized.sort(key=lambda item: str(item.get('date') or ''))
+    latest = normalized[-1]
+    daily_return = _trend_daily_return(normalized)
+
+    return {
+        'date': str(latest.get('date')),
+        'nav': latest.get('net_worth'),
+        'daily_return': daily_return,
+    }
+
+
+def _sync_latest_official_nav(db, fund_code, result=None):
+    latest = None
+    try:
+        latest = _latest_nav_from_data_service(fund_code)
+    except Exception as exc:
+        print(f"sync official nav: DataService unavailable for {fund_code}: {exc}")
+
+    if not latest:
+        latest = _latest_nav_from_fund_trend(db, fund_code)
+    if not latest:
+        return result
+
+    estimate = db.query(FundEstimate).filter(FundEstimate.fund_code == fund_code).first()
+    if not estimate:
+        estimate = FundEstimate(fund_code=fund_code)
+        db.add(estimate)
+
+    latest_date = latest.get('date')
+    current_date = estimate.net_worth_date
+    if latest_date and (not current_date or str(latest_date) >= str(current_date)):
+        estimate.net_worth = _value_to_string(latest.get('nav'))
+        estimate.net_worth_date = latest_date
+        if latest.get('daily_return') is not None:
+            estimate.estimate_change = _value_to_string(latest.get('daily_return'))
+
+        if isinstance(result, dict):
+            result['net_worth'] = estimate.net_worth
+            result['net_worth_date'] = estimate.net_worth_date
+            result['estimate_change'] = estimate.estimate_change
+            result['official_nav_synced'] = True
+
+    return result
+
+
 def _refresh_fundgz_estimate(db, fund_code):
     real_time_url = f"http://fundgz.1234567.com.cn/js/{fund_code}.js"
     response = requests.get(real_time_url, headers={
@@ -1254,7 +2399,8 @@ def refresh_watchlist_estimates():
             if fund_code not in fund_codes:
                 continue
             if isinstance(item.get('data'), dict):
-                results.append(_upsert_data_service_estimate(db, fund_code, item['data']))
+                result = _upsert_data_service_estimate(db, fund_code, item['data'])
+                results.append(_sync_latest_official_nav(db, fund_code, result))
                 successful_codes.add(fund_code)
                 data_service_success_count += 1
                 updated_count += 1
@@ -1279,6 +2425,7 @@ def refresh_watchlist_estimates():
             fallback_result = _refresh_fundgz_estimate(db, fund_code)
             
             if fallback_result:
+                fallback_result = _sync_latest_official_nav(db, fund_code, fallback_result)
                 updated_count += 1
                 fallback_success_count += 1
                 results.append(fallback_result)
@@ -1788,23 +2935,7 @@ def _save_screening_snapshot_item(db, item, type_lookup):
             performance_json=_json_dumps(performance),
         ))
 
-    nav_date = item.get('navDate')
-    nav = item.get('nav')
-    if nav_date and nav is not None:
-        try:
-            nav_value = float(nav)
-            nav_record = db.query(FundNavHistory).filter(
-                FundNavHistory.fund_code == code,
-                FundNavHistory.trade_date == str(nav_date),
-            ).first()
-            if not nav_record:
-                nav_record = FundNavHistory(fund_code=code, trade_date=str(nav_date))
-                db.add(nav_record)
-            nav_record.nav = nav_value
-            nav_record.fetch_time = datetime.now()
-            nav_record.updated_time = datetime.now()
-        except (TypeError, ValueError):
-            pass
+    _refresh_fund_industry_tag(db, code, fetch_holdings_if_missing=False)
     return True
 
 
@@ -1912,37 +3043,9 @@ def _load_nav_history_rows(db, fund_code):
 
 
 def _upsert_nav_history_rows(db, fund_code, payload):
-    now = datetime.now()
-    count = 0
-    for item in _nav_history_payload_items(payload):
-        if not isinstance(item, dict):
-            continue
-        trade_date = item.get('date')
-        nav = item.get('nav')
-        if not trade_date or nav is None:
-            continue
-        try:
-            nav_value = float(nav)
-        except (TypeError, ValueError):
-            continue
-
-        record = db.query(FundNavHistory).filter(
-            FundNavHistory.fund_code == fund_code,
-            FundNavHistory.trade_date == str(trade_date),
-        ).first()
-        if not record:
-            record = FundNavHistory(
-                fund_code=fund_code,
-                trade_date=str(trade_date),
-            )
-            db.add(record)
-        record.nav = nav_value
-        record.acc_nav = item.get('accNav')
-        record.daily_return = item.get('dailyReturn')
-        record.fetch_time = now
-        record.updated_time = now
-        count += 1
-    return count
+    # Historical NAV is now used only transiently for risk calculation.
+    # Keep this compatibility helper non-persistent to prevent DB growth.
+    return len(_nav_history_payload_items(payload))
 
 
 def _snapshot_nav_date(db, fund_code):
@@ -1989,14 +3092,8 @@ def _sync_nav_history_ifund_style(db, fund_code, force=False):
 def update_single_fund_risk_metrics(fund_code, db):
     fund_code = _normalize_fund_code(fund_code)
     try:
-        # 先检查现有净值数据量，不足30条时强制全量同步
-        existing_rows = db.query(FundNavHistory).filter(
-            FundNavHistory.fund_code == fund_code,
-            FundNavHistory.nav.isnot(None)
-        ).count()
-        force_sync = existing_rows < 30
-        _sync_nav_history_ifund_style(db, fund_code, force=force_sync)
-        net_worth_trend = _load_nav_history_rows(db, fund_code)
+        payload = get_data_service_client().get_fund_nav_history(fund_code)
+        net_worth_trend = _nav_history_to_risk_input(payload)
         if len(net_worth_trend) < 30:
             print(f"[补充风险] 跳过 {fund_code}: 净值不足({len(net_worth_trend)}条)", flush=True)
             return False
@@ -2005,6 +3102,7 @@ def update_single_fund_risk_metrics(fund_code, db):
             print(f"[补充风险] 跳过 {fund_code}: 风险计算失败(可能数据异常或基金太新)", flush=True)
             return False
         _save_risk_metrics(db, fund_code, risk_metrics)
+        _refresh_fund_industry_tag(db, fund_code, fetch_holdings_if_missing=True)
         db.commit()
         return True
     except Exception as e:
@@ -2048,6 +3146,450 @@ def _select_nav_candidates(db, nav_limit):
         selected_codes = {item['code'] for item in selected}
         selected.extend(item for item in candidates if item['code'] not in selected_codes)
     return selected[:nav_limit]
+
+
+def _fund_codes_needing_industry_refresh(db, candidate_codes=None, force=False):
+    query = db.query(FundBasicInfo.fund_code)
+    if candidate_codes is not None:
+        codes = [_normalize_fund_code(code) for code in candidate_codes if _normalize_fund_code(code)]
+        if not codes:
+            return []
+        query = query.filter(FundBasicInfo.fund_code.in_(codes))
+
+    basic_codes = [row[0] for row in query.all() if row[0]]
+    if force:
+        return basic_codes
+
+    tag_rows = db.query(FundIndustryTag).filter(
+        FundIndustryTag.fund_code.in_(basic_codes)
+    ).all() if basic_codes else []
+    tag_map = {row.fund_code: row for row in tag_rows}
+
+    result = []
+    for code in basic_codes:
+        tag = tag_map.get(code)
+        if not tag:
+            result.append(code)
+            continue
+        if tag.basis == 'missing_holdings' or (tag.industry_count or 0) <= 0:
+            result.append(code)
+            continue
+        if not tag.industry_tag:
+            result.append(code)
+    return result
+
+
+def _collect_stock_codes_from_portfolios(db, fund_codes=None):
+    query = db.query(FundPortfolio)
+    if fund_codes is not None:
+        codes = [_normalize_fund_code(code) for code in fund_codes if _normalize_fund_code(code)]
+        if not codes:
+            return []
+        query = query.filter(FundPortfolio.fund_code.in_(codes))
+
+    stock_codes = []
+    for portfolio in query.all():
+        raw_holdings = _json_loads(portfolio.stock_codes_new_json, []) or _json_loads(portfolio.stock_codes_json, [])
+        for item in _portfolio_holding_items(raw_holdings):
+            code = _normalize_stock_code(item.get('code'))
+            if code and code not in stock_codes:
+                stock_codes.append(code)
+    return stock_codes
+
+
+def warm_stock_industry_dictionary(db, fund_codes=None, force=False, limit=None):
+    stock_codes = _collect_stock_codes_from_portfolios(db, fund_codes)
+    if limit is not None:
+        try:
+            limit = max(1, int(limit))
+            stock_codes = stock_codes[:limit]
+        except (TypeError, ValueError):
+            pass
+
+    if not stock_codes:
+        return {'total': 0, 'cached': 0, 'fetched': 0, 'failed': 0}
+
+    records = db.query(StockIndustry).filter(StockIndustry.stock_code.in_(stock_codes)).all()
+    cached_codes = {
+        record.stock_code
+        for record in records
+        if record.industry and not force
+    }
+    missing_codes = [code for code in stock_codes if force or code not in cached_codes]
+    if not missing_codes:
+        return {'total': len(stock_codes), 'cached': len(cached_codes), 'fetched': 0, 'failed': 0}
+
+    fetched_map, failed_codes = _fetch_stock_industry_batch(
+        db,
+        missing_codes,
+        force_refresh=force,
+        timeout=8.0 if force else 5.0,
+    )
+    db.commit()
+    return {
+        'total': len(stock_codes),
+        'cached': len(cached_codes),
+        'fetched': len(fetched_map),
+        'failed': len(failed_codes),
+    }
+
+
+def _akshare_row_value(row, fallback_index, *names):
+    for name in names:
+        try:
+            value = row.get(name)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+    try:
+        return row.iloc[fallback_index]
+    except Exception:
+        return None
+
+
+def build_stock_industry_dictionary_from_akshare(db, force=False, board_limit=None, stock_limit=None):
+    try:
+        import akshare as ak
+    except Exception as exc:
+        raise RuntimeError(f"akshare not available: {exc}")
+
+    try:
+        board_limit = int(board_limit) if board_limit else None
+    except (TypeError, ValueError):
+        board_limit = None
+    try:
+        stock_limit = int(stock_limit) if stock_limit else None
+    except (TypeError, ValueError):
+        stock_limit = None
+
+    try:
+        result = _build_stock_industry_dictionary_from_sina(
+            db,
+            ak,
+            force=force,
+            board_limit=board_limit,
+            stock_limit=stock_limit,
+        )
+        result['source'] = 'akshare.sina.sector'
+        return result
+    except Exception as exc:
+        print(f"akshare sina industry dictionary failed, fallback to eastmoney: {exc}", flush=True)
+        board_df = ak.stock_board_industry_name_em()
+        result = _build_stock_industry_dictionary_from_em_boards(
+            db,
+            ak,
+            board_df,
+            force=force,
+            board_limit=board_limit,
+            stock_limit=stock_limit,
+        )
+        result['source'] = 'akshare.eastmoney.industry_board'
+        return result
+
+
+def _build_stock_industry_dictionary_from_em_boards(db, ak, board_df, force=False, board_limit=None, stock_limit=None):
+    if board_df is None or getattr(board_df, 'empty', True):
+        return {'boards': 0, 'stocks': 0, 'created_or_updated': 0, 'skipped': 0, 'failed_boards': 0}
+
+    boards = []
+    for _, row in board_df.iterrows():
+        name = _akshare_row_value(row, 1, '板块名称', '行业名称', '名称', 'name')
+        code = _akshare_row_value(row, 0, '板块代码', '代码', 'code')
+        if name:
+            boards.append({'name': str(name), 'code': str(code or '')})
+    if board_limit:
+        boards = boards[:board_limit]
+
+    updated = 0
+    skipped = 0
+    seen_stocks = set()
+    failed_boards = 0
+    for index, board in enumerate(boards, 1):
+        if stock_limit and len(seen_stocks) >= stock_limit:
+            break
+        try:
+            cons_df = ak.stock_board_industry_cons_em(symbol=board['name'])
+        except Exception as exc:
+            failed_boards += 1
+            print(f"akshare stock industry dictionary: failed board {board['name']}: {exc}", flush=True)
+            continue
+        if cons_df is None or getattr(cons_df, 'empty', True):
+            continue
+
+        for _, stock_row in cons_df.iterrows():
+            if stock_limit and len(seen_stocks) >= stock_limit:
+                break
+            stock_code = _normalize_stock_code(_akshare_row_value(stock_row, 1, '代码', '股票代码', 'code'))
+            if not stock_code or not re.match(r'^\d{6}$', stock_code):
+                continue
+            stock_name = _akshare_row_value(stock_row, 2, '名称', '股票名称', 'name')
+            if stock_code in seen_stocks:
+                continue
+            seen_stocks.add(stock_code)
+
+            record = db.query(StockIndustry).filter(StockIndustry.stock_code == stock_code).first()
+            if not record:
+                record = StockIndustry(stock_code=stock_code)
+                db.add(record)
+            elif record.industry and not force:
+                skipped += 1
+                continue
+
+            record.stock_name = str(stock_name or record.stock_name or '')
+            record.industry = board['name']
+            record.region = record.region or ''
+            concepts = _json_loads(record.concepts_json, [])
+            if board['name'] not in concepts:
+                concepts.append(board['name'])
+            record.concepts_json = _json_dumps(concepts[:20])
+            record.source = 'akshare.eastmoney.industry_board'
+            record.updated_time = datetime.now()
+            updated += 1
+
+        if index % 10 == 0:
+            db.commit()
+
+    db.commit()
+    return {
+        'boards': len(boards),
+        'stocks': len(seen_stocks),
+        'created_or_updated': updated,
+        'skipped': skipped,
+        'failed_boards': failed_boards,
+    }
+
+
+def _build_stock_industry_dictionary_from_sina(db, ak, force=False, board_limit=None, stock_limit=None):
+    board_df = ak.stock_sector_spot()
+    if board_df is None or getattr(board_df, 'empty', True):
+        return {'boards': 0, 'stocks': 0, 'created_or_updated': 0, 'skipped': 0, 'failed_boards': 0}
+
+    boards = []
+    for _, row in board_df.iterrows():
+        label = row.get('label') if hasattr(row, 'get') else None
+        name = _akshare_row_value(row, 1, '行业', '板块', 'name')
+        if label and name:
+            boards.append({'label': str(label), 'name': str(name)})
+    if board_limit:
+        boards = boards[:board_limit]
+
+    updated = 0
+    skipped = 0
+    seen_stocks = set()
+    failed_boards = 0
+    for index, board in enumerate(boards, 1):
+        if stock_limit and len(seen_stocks) >= stock_limit:
+            break
+        try:
+            cons_df = ak.stock_sector_detail(sector=board['label'])
+        except Exception as exc:
+            failed_boards += 1
+            print(f"akshare sina industry dictionary: failed board {board['name']}: {exc}", flush=True)
+            continue
+        if cons_df is None or getattr(cons_df, 'empty', True):
+            continue
+
+        for _, stock_row in cons_df.iterrows():
+            if stock_limit and len(seen_stocks) >= stock_limit:
+                break
+            stock_code = _normalize_stock_code(stock_row.get('code') if hasattr(stock_row, 'get') else None)
+            if not stock_code or not re.match(r'^\d{6}$', stock_code):
+                continue
+            stock_name = stock_row.get('name') if hasattr(stock_row, 'get') else None
+            if stock_code in seen_stocks:
+                continue
+            seen_stocks.add(stock_code)
+
+            record = db.query(StockIndustry).filter(StockIndustry.stock_code == stock_code).first()
+            if not record:
+                record = StockIndustry(stock_code=stock_code)
+                db.add(record)
+            elif record.industry and not force:
+                skipped += 1
+                continue
+
+            record.stock_name = str(stock_name or record.stock_name or '')
+            record.industry = board['name']
+            record.region = record.region or ''
+            concepts = _json_loads(record.concepts_json, [])
+            if board['name'] not in concepts:
+                concepts.append(board['name'])
+            record.concepts_json = _json_dumps(concepts[:20])
+            record.source = 'akshare.sina.sector'
+            record.updated_time = datetime.now()
+            updated += 1
+
+        if index % 10 == 0:
+            db.commit()
+
+    db.commit()
+    return {
+        'boards': len(boards),
+        'stocks': len(seen_stocks),
+        'created_or_updated': updated,
+        'skipped': skipped,
+        'failed_boards': failed_boards,
+    }
+
+
+def batch_refresh_fund_industry_tags(
+    db,
+    fund_codes=None,
+    task_id=None,
+    force=False,
+    limit=None,
+    build_full_dictionary=False,
+    allow_missing_stock_network=False,
+):
+    codes = _fund_codes_needing_industry_refresh(db, fund_codes, force=force)
+    if limit is not None:
+        try:
+            limit = max(1, int(limit))
+            codes = codes[:limit]
+        except (TypeError, ValueError):
+            pass
+
+    total = len(codes)
+    if total == 0:
+        return {'success_count': 0, 'fail_count': 0, 'total': 0}
+
+    full_dictionary_result = None
+    full_dictionary_ok = False
+    if build_full_dictionary:
+        _set_screening_progress(
+            db,
+            task_id,
+            message='构建全市场股票行业字典...',
+            target_count=total,
+            current_count=0,
+            success_count=0,
+            fail_count=0,
+            current_item='',
+        )
+        try:
+            full_dictionary_result = build_stock_industry_dictionary_from_akshare(db)
+            full_dictionary_ok = True
+            print(f"[stock industry dictionary] akshare full build: {full_dictionary_result}", flush=True)
+        except Exception as exc:
+            print(f"[stock industry dictionary] akshare full build failed: {exc}", flush=True)
+
+    _set_screening_progress(
+        db,
+        task_id,
+        message='读取本地股票行业字典...',
+        target_count=total,
+        current_count=0,
+        success_count=0,
+        fail_count=0,
+        current_item='',
+    )
+    dictionary_result = {
+        'portfolio_stock_total': len(_collect_stock_codes_from_portfolios(db, codes)),
+        'mapped_stock_total': db.query(StockIndustry).filter(
+            StockIndustry.industry.isnot(None),
+            StockIndustry.industry != '',
+        ).count(),
+    }
+    print(f"[industry dictionary] local lookup: {dictionary_result}", flush=True)
+
+    if allow_missing_stock_network and (not build_full_dictionary or full_dictionary_ok):
+        portfolio_stock_codes = _collect_stock_codes_from_portfolios(db, codes)
+        mapped_rows = db.query(StockIndustry).filter(
+            StockIndustry.stock_code.in_(portfolio_stock_codes),
+            StockIndustry.industry.isnot(None),
+            StockIndustry.industry != '',
+        ).all() if portfolio_stock_codes else []
+        mapped_codes = {row.stock_code for row in mapped_rows}
+        missing_stock_codes = [code for code in portfolio_stock_codes if code not in mapped_codes]
+        if missing_stock_codes:
+            _set_screening_progress(
+                db,
+                task_id,
+                message=f'批量补充缺失股票行业({len(missing_stock_codes)}只)...',
+                target_count=total,
+                current_count=0,
+                success_count=0,
+                fail_count=0,
+                current_item='',
+            )
+            fetched_map, failed_codes = _fetch_stock_industry_batch(
+                db,
+                missing_stock_codes,
+                force_refresh=False,
+                timeout=5.0,
+            )
+            db.commit()
+            print(
+                f"[industry dictionary] missing stocks fetched: "
+                f"{len(fetched_map)}/{len(missing_stock_codes)} "
+                f"(failed {len(failed_codes)})",
+                flush=True,
+            )
+    elif allow_missing_stock_network and build_full_dictionary and not full_dictionary_ok:
+        print(
+            "[industry dictionary] skip missing stock network fetch because akshare full build failed; "
+            "using local stock_industry only",
+            flush=True,
+        )
+
+    success = 0
+    fail = 0
+    _set_screening_progress(
+        db,
+        task_id,
+        message='刷新基金行业标签...',
+        target_count=total,
+        current_count=0,
+        success_count=0,
+        fail_count=0,
+        current_item='',
+    )
+
+    for index, code in enumerate(codes, 1):
+        if screening_stop_flag:
+            break
+
+        _set_screening_progress(
+            db,
+            task_id,
+            current_count=index,
+            current_item=code,
+        )
+        try:
+            tag = _refresh_fund_industry_tag(
+                db,
+                code,
+                fetch_holdings_if_missing=True,
+                force_stock_refresh=False,
+                allow_stock_network=False,
+            )
+            if tag:
+                success += 1
+            else:
+                fail += 1
+        except Exception as exc:
+            print(f"batch industry tag refresh failed for {code}: {exc}", flush=True)
+            fail += 1
+
+        if index % 20 == 0:
+            db.commit()
+            _set_screening_progress(
+                db,
+                task_id,
+                success_count=success,
+                fail_count=fail,
+            )
+
+    db.commit()
+    _set_screening_progress(
+        db,
+        task_id,
+        success_count=success,
+        fail_count=fail,
+        current_item='',
+    )
+    return {'success_count': success, 'fail_count': fail, 'total': total}
 
 
 def _create_data_fetch_task(db, task_type, options=None, message=''):
@@ -2374,9 +3916,16 @@ screening_update_status = {
 screening_stop_flag = False
 
 
-def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise_limit=500, task_id=None):
+def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise_limit=500, task_id=None, industry_limit=None, tasks=None):
     """Run the ifund-style screening refresh: local snapshot first, optional candidate NAV sync."""
     global screening_update_status, screening_stop_flag
+
+    tasks = tasks or {}
+    update_basic = bool(tasks.get('basic', True))
+    calculate_rankings_task = bool(tasks.get('rankings', update_basic))
+    calculate_risk_task = bool(tasks.get('risk', mode != 'sync_only'))
+    refresh_industry_task = bool(tasks.get('industry', True))
+    rebuild_industry_performance_task = bool(tasks.get('industry_performance', refresh_industry_task))
 
     db = SessionLocal()
     t0 = time.time()
@@ -2391,6 +3940,8 @@ def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise
                     'limit': limit,
                     'mode': mode,
                     'nav_limit': precise_limit,
+                    'industry_limit': industry_limit,
+                    'tasks': tasks,
                 },
                 message='获取批量排行...',
             )
@@ -2419,7 +3970,19 @@ def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise
         })
         _set_screening_progress(db, task_id, status='running', message='获取批量排行...')
 
-        fund_list = _fetch_screening_snapshot_items(limit=limit, db=db, task_id=task_id)
+        if update_basic:
+            fund_list = _fetch_screening_snapshot_items(limit=limit, db=db, task_id=task_id)
+        else:
+            query = db.query(FundBasicInfo)
+            if limit:
+                try:
+                    query = query.limit(max(1, int(limit)))
+                except (TypeError, ValueError):
+                    pass
+            fund_list = [
+                {'code': item.fund_code, 'name': item.fund_name, 'type': item.fund_type}
+                for item in query.all()
+            ]
         t_lookup_start = time.time()
         type_lookup = _fund_type_lookup()
         print(f"[筛查更新] 类型查找表构建: {len(type_lookup)}条 ({time.time()-t_lookup_start:.1f}s)", flush=True)
@@ -2438,67 +4001,70 @@ def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise
         success_count = 0
         fail_count = 0
         total_to_save = len(fund_list)
-        print(f"[筛查更新] 开始写入基础数据: {total_to_save}只...", flush=True)
-        _set_screening_progress(
-            db,
-            task_id,
-            message='写入基础数据...',
-            target_count=total_to_save,
-            current_count=0,
-            success_count=0,
-            fail_count=0,
-            current_item='',
-        )
-
-        for index, fund in enumerate(fund_list, 1):
-            if screening_stop_flag:
-                _set_screening_progress(
-                    db,
-                    task_id,
-                    status='stopped',
-                    message=f"已手动停止。成功: {success_count}, 失败: {fail_count}",
-                    current_count=index - 1,
-                    success_count=success_count,
-                    fail_count=fail_count,
-                )
-                return {'success': False, 'stopped': True}
-
-            fund_code = _normalize_fund_code(fund.get('code', ''))
-            if _save_screening_snapshot_item(db, fund, type_lookup):
-                success_count += 1
-            else:
-                fail_count += 1
-
-            screening_update_status.update({
-                'progress': index,
-                'current_fund': f"{fund_code} - {fund.get('name', '')}",
-                'success_count': success_count,
-                'fail_count': fail_count,
-            })
-
-            db.commit()
+        if update_basic:
+            print(f"[筛查更新] 开始写入基础数据: {total_to_save}只...", flush=True)
             _set_screening_progress(
                 db,
                 task_id,
-                current_count=index,
-                current_item=f"{fund_code} - {fund.get('name', '')}",
-                success_count=success_count,
-                fail_count=fail_count,
+                message='写入基础数据...',
+                target_count=total_to_save,
+                current_count=0,
+                success_count=0,
+                fail_count=0,
+                current_item='',
             )
 
-            if index % 500 == 0:
-                print(f"[筛查更新] 写入进度: {index}/{total_to_save} (成功{success_count}, 失败{fail_count})", flush=True)
+            for index, fund in enumerate(fund_list, 1):
+                if screening_stop_flag:
+                    _set_screening_progress(
+                        db,
+                        task_id,
+                        status='stopped',
+                        message=f"已手动停止。成功: {success_count}, 失败: {fail_count}",
+                        current_count=index - 1,
+                        success_count=success_count,
+                        fail_count=fail_count,
+                    )
+                    return {'success': False, 'stopped': True}
 
-        db.commit()
-        print(f"[筛查更新] 基础数据写入完成: 成功{success_count}, 失败{fail_count}, 耗时{time.time()-t0:.1f}s", flush=True)
+                fund_code = _normalize_fund_code(fund.get('code', ''))
+                if _save_screening_snapshot_item(db, fund, type_lookup):
+                    success_count += 1
+                else:
+                    fail_count += 1
 
-        if not screening_stop_flag:
+                screening_update_status.update({
+                    'progress': index,
+                    'current_fund': f"{fund_code} - {fund.get('name', '')}",
+                    'success_count': success_count,
+                    'fail_count': fail_count,
+                })
+
+                db.commit()
+                _set_screening_progress(
+                    db,
+                    task_id,
+                    current_count=index,
+                    current_item=f"{fund_code} - {fund.get('name', '')}",
+                    success_count=success_count,
+                    fail_count=fail_count,
+                )
+
+                if index % 500 == 0:
+                    print(f"[筛查更新] 写入进度: {index}/{total_to_save} (成功{success_count}, 失败{fail_count})", flush=True)
+
+            db.commit()
+            print(f"[筛查更新] 基础数据写入完成: 成功{success_count}, 失败{fail_count}, 耗时{time.time()-t0:.1f}s", flush=True)
+        else:
+            _set_screening_progress(db, task_id, message='跳过基础数据更新...', target_count=total_to_save, current_count=0)
+
+        if not screening_stop_flag and calculate_rankings_task:
             print(f"[筛查更新] 开始计算同类排名...", flush=True)
             _set_screening_progress(db, task_id, message='计算同类排名...', current_item='')
             calculate_same_type_rankings(db)
             print(f"[筛查更新] 同类排名计算完成", flush=True)
 
-        if not screening_stop_flag and mode == 'sync_nav':
+        if not screening_stop_flag and calculate_risk_task:
             candidates = _select_nav_candidates(db, precise_limit)
             nav_success = 0
             nav_fail = 0
@@ -2546,6 +4112,33 @@ def batch_update_fund_data(fund_types=None, limit=None, mode='sync_nav', precise
 
             success_count = nav_success
             fail_count = nav_fail
+
+        if not screening_stop_flag and refresh_industry_task:
+            industry_codes = [
+                _normalize_fund_code(item.get('code'))
+                for item in fund_list
+                if _normalize_fund_code(item.get('code'))
+            ]
+            industry_result = batch_refresh_fund_industry_tags(
+                db,
+                fund_codes=industry_codes,
+                task_id=task_id,
+                force=False,
+                limit=industry_limit,
+                build_full_dictionary=True,
+                allow_missing_stock_network=True,
+            )
+            print(
+                f"[screening update] industry tags refreshed: "
+                f"{industry_result['success_count']}/{industry_result['total']} "
+                f"(fail {industry_result['fail_count']})",
+                flush=True,
+            )
+
+        if not screening_stop_flag and rebuild_industry_performance_task:
+            _set_screening_progress(db, task_id, message='汇总行业表现...', current_item='')
+            rebuild_industry_performance_stats(db)
+            db.commit()
 
         message = f"完成。模式: {mode}, 成功: {success_count}, 失败: {fail_count}"
         _set_screening_progress(
@@ -2599,17 +4192,17 @@ def batch_fill_risk_metrics(db=None, task_id=None):
         ).all():
             risk_codes.add(row[0])
 
-        missing_codes = sorted(all_basic_codes - risk_codes)
+        missing_risk_codes = all_basic_codes - risk_codes
+        missing_industry_codes = set(_fund_codes_needing_industry_refresh(db, all_basic_codes, force=False))
+        missing_codes = sorted(missing_risk_codes | missing_industry_codes)
+        industry_tag_count = db.query(FundIndustryTag.fund_code).count()
 
-        # 统计净值情况
-        nav_count = db.query(FundNavHistory.fund_code).filter(
-            FundNavHistory.nav.isnot(None)
-        ).distinct().count()
-
-        print(f"[补充风险] 缺风险指标: {len(missing_codes)}只 (总计:{len(all_basic_codes)}, 有风险:{len(risk_codes)}, 有净值记录基金:{nav_count})", flush=True)
+        print(f"[补充风险] 待处理: {len(missing_codes)}只 (缺风险:{len(missing_risk_codes)}, 缺行业:{len(missing_industry_codes)}, 总计:{len(all_basic_codes)}, 有风险:{len(risk_codes)}, 行业标签:{industry_tag_count})", flush=True)
 
         if not missing_codes:
             print("[补充风险] 无需补充，所有基金已有风险指标", flush=True)
+            rebuild_industry_performance_stats(db)
+            db.commit()
             screening_update_status['running'] = False
             return {'success': True, 'total': 0, 'message': '所有基金已有风险指标'}
 
@@ -2648,7 +4241,12 @@ def batch_fill_risk_metrics(db=None, task_id=None):
                 'fail_count': fail,
             })
 
-            if update_single_fund_risk_metrics(code, db):
+            if code in missing_risk_codes:
+                ok = update_single_fund_risk_metrics(code, db)
+            else:
+                ok = _refresh_fund_industry_tag(db, code, fetch_holdings_if_missing=True) is not None
+
+            if ok:
                 success += 1
             else:
                 fail += 1
@@ -2660,6 +4258,9 @@ def batch_fill_risk_metrics(db=None, task_id=None):
 
             if idx % 100 == 0:
                 print(f"[补充风险] 进度: {idx}/{len(missing_codes)} (成功{success}, 失败{fail})", flush=True)
+
+        rebuild_industry_performance_stats(db)
+        db.commit()
 
         print(f"[补充风险] 完成: 成功{success}, 失败{fail}", flush=True)
         _set_screening_progress(db, task_id, status='finished',
@@ -2714,6 +4315,7 @@ def get_screening_status():
         FundRiskMetrics.sharpe_ratio_1y.isnot(None)
     ).count()
     rank_count = db.query(FundScreeningRank).count()
+    industry_tag_count = db.query(FundIndustryTag).count()
     nav_history_count = db.query(FundNavHistory).count()
     pass_4433_count = db.query(FundScreeningRank).filter(
         FundScreeningRank.pass_4433 == 1
@@ -2742,6 +4344,7 @@ def get_screening_status():
         'basic_count': basic_count,
         'risk_metrics_count': risk_count,
         'ranking_count': rank_count,
+        'industry_tag_count': industry_tag_count,
         'nav_history_count': nav_history_count,
         'pass_4433_count': pass_4433_count,
         'latest_update': latest_update,
@@ -2802,9 +4405,11 @@ def start_screening_update():
     """启动基金数据批量更新"""
     data = request.get_json() or {}
     fund_types = data.get('fund_types') or []
-    limit = data.get('limit')  # 可选：限制更新数量（测试用）
+    limit = data.get('limit')
     mode = data.get('mode') or 'sync_nav'
     precise_limit = data.get('precise_limit', 500)
+    industry_limit = data.get('industry_limit')
+    tasks = data.get('tasks') or {}
     db = get_db()
     latest_task = _latest_active_task(db)
     
@@ -2827,13 +4432,15 @@ def start_screening_update():
             'limit': limit,
             'mode': mode,
             'nav_limit': precise_limit,
+            'industry_limit': industry_limit,
+            'tasks': tasks,
         },
         message='更新任务已启动',
     )
 
     thread = threading.Thread(
         target=batch_update_fund_data, 
-        args=(fund_types, limit, mode, precise_limit, task.id)
+        args=(fund_types, limit, mode, precise_limit, task.id, industry_limit, tasks)
     )
     thread.daemon = True
     thread.start()
@@ -2844,6 +4451,8 @@ def start_screening_update():
         'limit': limit,
         'mode': mode,
         'nav_limit': precise_limit,
+        'industry_limit': industry_limit,
+        'tasks': tasks,
         'task_id': task.id
     })
 
@@ -2963,6 +4572,142 @@ def get_available_fund_types():
     return jsonify({'types': types})
 
 
+@app.route('/api/screening/industry-tags', methods=['GET'])
+def get_screening_industry_tags():
+    """Return available fund industry tags inferred from cached top holdings."""
+    db = get_db()
+    if db.query(FundIndustryTag).count() == 0:
+        fund_codes = [
+            row[0]
+            for row in db.query(FundPortfolio.fund_code).all()
+            if row[0]
+        ]
+        _screening_industry_context(db, fund_codes)
+        rebuild_industry_performance_stats(db)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    stats = {}
+    rows = db.query(FundIndustryTag.industry_tag, func.count(FundIndustryTag.fund_code)).group_by(
+        FundIndustryTag.industry_tag
+    ).all()
+    for name, count in rows:
+        name = name or '混合型'
+        item = stats.setdefault(name, {
+            'name': name,
+            'count': 0,
+        })
+        item['count'] += count or 0
+
+    items = sorted(stats.values(), key=lambda item: item['count'], reverse=True)
+    return jsonify({
+        'data': items,
+        'total': len(items),
+    })
+
+
+@app.route('/api/screening/rebuild-industry-tags', methods=['POST'])
+def rebuild_screening_industry_tags():
+    """Rebuild persisted fund industry tags from cached holdings and stock industries."""
+    db = get_db()
+    data = request.get_json() or {}
+    force = bool(data.get('force'))
+    limit = data.get('limit')
+    fund_codes = [
+        row[0]
+        for row in db.query(FundBasicInfo.fund_code).all()
+        if row[0]
+    ]
+    try:
+        result = batch_refresh_fund_industry_tags(
+            db,
+            fund_codes=fund_codes,
+            force=force,
+            limit=limit,
+            build_full_dictionary=True,
+            allow_missing_stock_network=True,
+        )
+        rebuild_industry_performance_stats(db)
+    except Exception as exc:
+        db.rollback()
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    db.commit()
+
+    return jsonify({
+        'success': True,
+        'total': len(fund_codes),
+        'processed': result,
+    })
+
+
+@app.route('/api/screening/stock-industry/status', methods=['GET'])
+def get_stock_industry_status():
+    db = get_db()
+    total = db.query(StockIndustry).count()
+    with_industry = db.query(StockIndustry).filter(
+        StockIndustry.industry.isnot(None),
+        StockIndustry.industry != '',
+    ).count()
+    portfolio_stock_total = len(_collect_stock_codes_from_portfolios(db))
+    latest = db.query(StockIndustry).order_by(desc(StockIndustry.updated_time)).first()
+    return jsonify({
+        'total': total,
+        'with_industry': with_industry,
+        'missing_industry': max(total - with_industry, 0),
+        'portfolio_stock_total': portfolio_stock_total,
+        'portfolio_stock_unmapped': max(portfolio_stock_total - with_industry, 0),
+        'latest_update': latest.updated_time.isoformat() if latest and latest.updated_time else None,
+    })
+
+
+@app.route('/api/screening/stock-industry/warmup', methods=['POST'])
+def warmup_stock_industry():
+    db = get_db()
+    data = request.get_json() or {}
+    force = bool(data.get('force'))
+    limit = data.get('limit')
+    fund_codes = data.get('fund_codes')
+    if isinstance(fund_codes, str):
+        fund_codes = [code.strip() for code in fund_codes.split(',') if code.strip()]
+    try:
+        result = warm_stock_industry_dictionary(
+            db,
+            fund_codes=fund_codes if isinstance(fund_codes, list) else None,
+            force=force,
+            limit=limit,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({
+        'success': True,
+        'data': result,
+    })
+
+
+@app.route('/api/screening/stock-industry/build-akshare', methods=['POST'])
+def build_stock_industry_from_akshare():
+    db = get_db()
+    data = request.get_json() or {}
+    try:
+        result = build_stock_industry_dictionary_from_akshare(
+            db,
+            force=bool(data.get('force')),
+            board_limit=data.get('board_limit'),
+            stock_limit=data.get('stock_limit'),
+        )
+    except Exception as exc:
+        db.rollback()
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({
+        'success': True,
+        'data': result,
+    })
+
+
 @app.route('/api/screening/query', methods=['POST'])
 def query_screening_funds():
     """
@@ -2991,11 +4736,14 @@ def query_screening_funds():
     query = db.query(
         FundBasicInfo,
         FundRiskMetrics,
-        FundScreeningRank
+        FundScreeningRank,
+        FundIndustryTag
     ).outerjoin(
         FundRiskMetrics, FundBasicInfo.fund_code == FundRiskMetrics.fund_code
     ).outerjoin(
         FundScreeningRank, FundBasicInfo.fund_code == FundScreeningRank.fund_code
+    ).outerjoin(
+        FundIndustryTag, FundBasicInfo.fund_code == FundIndustryTag.fund_code
     )
     
     # 应用预设策略
@@ -3075,7 +4823,9 @@ def query_screening_funds():
         'calmar_ratio_1y': FundRiskMetrics.calmar_ratio_1y,
         'rank_pct_1y': FundScreeningRank.rank_pct_1y,
         'rank_pct_3m': FundScreeningRank.rank_pct_3m,
+        'fund_code': FundBasicInfo.fund_code,
         'fund_name': FundBasicInfo.fund_name,
+        'fund_type': FundBasicInfo.fund_type,
         'updated_time': FundBasicInfo.updated_time,
     }
     
@@ -3086,9 +4836,16 @@ def query_screening_funds():
         query = query.order_by(asc(sort_column))
     
     # 计算总数
+    industry_filters = [
+        str(item).strip()
+        for item in (filters.get('industry_tags') or [])
+        if str(item).strip()
+    ]
+
+    if industry_filters:
+        query = query.filter(FundIndustryTag.industry_tag.in_(industry_filters))
+
     total_count = query.count()
-    
-    # 分页
     offset = (page - 1) * page_size
     results = query.offset(offset).limit(page_size).all()
     
@@ -3097,7 +4854,7 @@ def query_screening_funds():
     
     # 脏数据自动清理标记（不立即清理，而是返回NULL，防止展示离谱数据）
     # 如果用户需要修复，可以点击“更新数据”
-    for basic, risk, rank in results:
+    for basic, risk, rank, industry_tag in results:
         # 解析业绩数据
         perf = _json_loads(basic.performance_json, {}) if basic else {}
         
@@ -3130,6 +4887,14 @@ def query_screening_funds():
             'rank_pct_6m': rank.rank_pct_6m if rank else None,
             'rank_pct_1y': rank.rank_pct_1y if rank else None,
             'pass_4433': (rank.pass_4433 == 1) if rank else False,
+            'industry_tag': ({
+                'name': industry_tag.industry_tag,
+                'ratio': industry_tag.industry_ratio,
+                'count': industry_tag.industry_count,
+                'basis': industry_tag.basis,
+                'source': industry_tag.source,
+            } if industry_tag else None),
+            'industry_tag_name': industry_tag.industry_tag if industry_tag else None,
             # 时间戳
             'updated_time': basic.updated_time.isoformat() if basic and basic.updated_time else None
         })
@@ -3653,6 +5418,725 @@ def _run_backtest(nav_dict, dates, investment_type, amount, initial_amount, fee_
         'summary': summary,
         'timeline': timeline
     }
+
+
+# ---------------------------------------------------------------------------
+# Research dashboard
+# ---------------------------------------------------------------------------
+
+RESEARCH_FUND_GROUPS = [
+    {"key": "equity", "name": "股票型", "keywords": ["股票"]},
+    {"key": "hybrid", "name": "混合型", "keywords": ["混合"]},
+    {"key": "bond", "name": "债券型", "keywords": ["债券", "债券型"]},
+    {"key": "index", "name": "指数型", "keywords": ["指数", "联接"]},
+    {"key": "etf", "name": "ETF", "keywords": ["ETF", "交易型开放式指数"]},
+    {"key": "qdii", "name": "QDII", "keywords": ["QDII"]},
+    {"key": "fof", "name": "FOF", "keywords": ["FOF"]},
+    {"key": "money", "name": "货币型", "keywords": ["货币"]},
+]
+
+
+def _to_float(value):
+    if value is None or value == '' or value == '--':
+        return None
+    try:
+        text = str(value).replace('%', '').replace(',', '').strip()
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_or_none(value, digits=2):
+    num = _to_float(value)
+    return round(num, digits) if num is not None else None
+
+
+def _median(values):
+    nums = sorted(v for v in (_to_float(item) for item in values) if v is not None)
+    if not nums:
+        return None
+    mid = len(nums) // 2
+    if len(nums) % 2:
+        return round(nums[mid], 2)
+    return round((nums[mid - 1] + nums[mid]) / 2, 2)
+
+
+def _avg(values):
+    nums = [v for v in (_to_float(item) for item in values) if v is not None]
+    return round(sum(nums) / len(nums), 2) if nums else None
+
+
+def _positive_rate(values):
+    nums = [v for v in (_to_float(item) for item in values) if v is not None]
+    return round(sum(1 for v in nums if v > 0) / len(nums) * 100, 2) if nums else None
+
+
+def _fund_type_matches(fund_type, fund_name, keywords):
+    text = f"{fund_type or ''} {fund_name or ''}".upper()
+    return any(str(keyword).upper() in text for keyword in keywords)
+
+
+def _fund_group_key(fund_type, fund_name):
+    for group in RESEARCH_FUND_GROUPS:
+        if _fund_type_matches(fund_type, fund_name, group["keywords"]):
+            return group["key"]
+    return "other"
+
+
+def _research_fund_row(basic, risk=None, rank=None, estimate=None):
+    perf = _json_loads(basic.performance_json, {}) if basic else {}
+    return {
+        "fund_code": basic.fund_code if basic else None,
+        "fund_name": basic.fund_name if basic else None,
+        "fund_type": basic.fund_type if basic else None,
+        "return_1m": _round_or_none(perf.get("1_month_return")),
+        "return_3m": _round_or_none(perf.get("3_month_return")),
+        "return_6m": _round_or_none(perf.get("6_month_return")),
+        "return_1y": _round_or_none(perf.get("1_year_return") if perf else basic.return_1y),
+        "return_3y": _round_or_none(perf.get("3_year_return")),
+        "max_drawdown_1y": _round_or_none(risk.max_drawdown_1y if risk else None),
+        "volatility_1y": _round_or_none(risk.volatility_1y if risk else None),
+        "sharpe_ratio_1y": _round_or_none(risk.sharpe_ratio_1y if risk else None),
+        "calmar_ratio_1y": _round_or_none(risk.calmar_ratio_1y if risk else None),
+        "rank_pct_1y": _round_or_none(rank.rank_pct_1y if rank else None),
+        "pass_4433": bool(rank and rank.pass_4433 == 1),
+        "estimate_change": _round_or_none(estimate.estimate_change if estimate else None),
+        "estimate_time": estimate.estimate_time if estimate else None,
+        "nav": _round_or_none(estimate.net_worth if estimate else None, 4),
+        "nav_date": estimate.net_worth_date if estimate else None,
+        "updated_time": basic.updated_time.isoformat() if basic and basic.updated_time else None,
+    }
+
+
+def _research_base_rows(db):
+    return db.query(
+        FundBasicInfo,
+        FundRiskMetrics,
+        FundScreeningRank,
+        FundEstimate,
+    ).outerjoin(
+        FundRiskMetrics, FundBasicInfo.fund_code == FundRiskMetrics.fund_code
+    ).outerjoin(
+        FundScreeningRank, FundBasicInfo.fund_code == FundScreeningRank.fund_code
+    ).outerjoin(
+        FundEstimate, FundBasicInfo.fund_code == FundEstimate.fund_code
+    ).all()
+
+
+def _build_research_market_stats(db):
+    rows = _research_base_rows(db)
+    items = [_research_fund_row(basic, risk, rank, estimate) for basic, risk, rank, estimate in rows]
+    total = len(items)
+    risk_ready = sum(1 for _, risk, _, _ in rows if risk and risk.sharpe_ratio_1y is not None)
+    rank_ready = sum(1 for _, _, rank, _ in rows if rank)
+    pass_4433 = sum(1 for _, _, rank, _ in rows if rank and rank.pass_4433 == 1)
+
+    type_map = {}
+    group_map = {}
+    for item in items:
+        fund_type = item.get("fund_type") or "未分类"
+        type_stat = type_map.setdefault(fund_type, {
+            "fund_type": fund_type,
+            "count": 0,
+            "pass_4433": 0,
+            "return_1y_values": [],
+            "return_3m_values": [],
+        })
+        type_stat["count"] += 1
+        type_stat["pass_4433"] += 1 if item.get("pass_4433") else 0
+        type_stat["return_1y_values"].append(item.get("return_1y"))
+        type_stat["return_3m_values"].append(item.get("return_3m"))
+
+        group_key = _fund_group_key(item.get("fund_type"), item.get("fund_name"))
+        group_stat = group_map.setdefault(group_key, {
+            "key": group_key,
+            "name": next((g["name"] for g in RESEARCH_FUND_GROUPS if g["key"] == group_key), "其他"),
+            "count": 0,
+            "return_1y_values": [],
+        })
+        group_stat["count"] += 1
+        group_stat["return_1y_values"].append(item.get("return_1y"))
+
+    type_stats = []
+    for stat in type_map.values():
+        type_stats.append({
+            "fund_type": stat["fund_type"],
+            "count": stat["count"],
+            "ratio": round(stat["count"] / total * 100, 2) if total else 0,
+            "pass_4433": stat["pass_4433"],
+            "pass_rate": round(stat["pass_4433"] / stat["count"] * 100, 2) if stat["count"] else 0,
+            "return_1y_median": _median(stat["return_1y_values"]),
+            "return_3m_median": _median(stat["return_3m_values"]),
+        })
+    type_stats.sort(key=lambda item: item["count"], reverse=True)
+
+    group_stats = []
+    for stat in group_map.values():
+        group_stats.append({
+            "key": stat["key"],
+            "name": stat["name"],
+            "count": stat["count"],
+            "ratio": round(stat["count"] / total * 100, 2) if total else 0,
+            "return_1y_median": _median(stat["return_1y_values"]),
+        })
+    group_stats.sort(key=lambda item: item["count"], reverse=True)
+
+    latest_update = max(
+        (basic.updated_time for basic, _, _, _ in rows if basic and basic.updated_time),
+        default=None,
+    )
+
+    return {
+        "summary": {
+            "total_funds": total,
+            "risk_ready": risk_ready,
+            "risk_ready_rate": round(risk_ready / total * 100, 2) if total else 0,
+            "rank_ready": rank_ready,
+            "rank_ready_rate": round(rank_ready / total * 100, 2) if total else 0,
+            "pass_4433": pass_4433,
+            "pass_4433_rate": round(pass_4433 / total * 100, 2) if total else 0,
+            "return_1y_median": _median(item.get("return_1y") for item in items),
+            "return_3m_median": _median(item.get("return_3m") for item in items),
+            "positive_1y_rate": _positive_rate(item.get("return_1y") for item in items),
+            "latest_update": latest_update.isoformat() if latest_update else None,
+        },
+        "type_stats": type_stats[:30],
+        "group_stats": group_stats,
+    }
+
+
+def _build_research_fund_dashboard(db, limit=5):
+    rows = _research_base_rows(db)
+    grouped = {
+        group["key"]: {
+            "key": group["key"],
+            "name": group["name"],
+            "items": [],
+            "summary": {},
+        }
+        for group in RESEARCH_FUND_GROUPS
+    }
+    grouped["other"] = {"key": "other", "name": "其他", "items": [], "summary": {}}
+
+    for basic, risk, rank, estimate in rows:
+        item = _research_fund_row(basic, risk, rank, estimate)
+        group_key = _fund_group_key(item.get("fund_type"), item.get("fund_name"))
+        grouped.setdefault(group_key, {"key": group_key, "name": "其他", "items": [], "summary": {}})
+        grouped[group_key]["items"].append(item)
+
+    cards = []
+    for group in grouped.values():
+        items = group["items"]
+        if not items:
+            continue
+        sorted_items = sorted(
+            items,
+            key=lambda item: (
+                item.get("pass_4433") is True,
+                item.get("sharpe_ratio_1y") if item.get("sharpe_ratio_1y") is not None else -999,
+                item.get("return_1y") if item.get("return_1y") is not None else -999,
+            ),
+            reverse=True,
+        )
+        cards.append({
+            "key": group["key"],
+            "name": group["name"],
+            "summary": {
+                "total": len(items),
+                "pass_4433": sum(1 for item in items if item.get("pass_4433")),
+                "return_1y_avg": _avg(item.get("return_1y") for item in items),
+                "sharpe_1y_avg": _avg(item.get("sharpe_ratio_1y") for item in items),
+            },
+            "items": sorted_items[:limit],
+        })
+
+    cards.sort(key=lambda card: card["summary"]["total"], reverse=True)
+    return {"cards": cards, "limit": limit}
+
+
+def _row_value(row, index, *names):
+    for name in names:
+        try:
+            value = row.get(name)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+    try:
+        return row.iloc[index]
+    except Exception:
+        return None
+
+
+def _parse_etf_trade_time(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        num = int(float(value))
+        if num > 1000000000:
+            return datetime.fromtimestamp(num)
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _refresh_etf_tracking_from_akshare(db, limit=500):
+    field_names = (
+        "f12,f14,f2,f441,f402,f4,f3,f5,f6,f17,f15,f16,f18,f7,f8,f10,"
+        "f30,f31,f32,f38,f21,f20,f297,f124"
+    )
+    params = {
+        "pn": "1",
+        "pz": str(max(limit, 100)),
+        "po": "1",
+        "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f12",
+        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827",
+        "fields": field_names,
+    }
+    rows = []
+    source = 'eastmoney.push2'
+    try:
+        response = requests.get(
+            "https://88.push2.eastmoney.com/api/qt/clist/get",
+            params=params,
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = (payload.get('data') or {}).get('diff') or []
+    except Exception as direct_exc:
+        print(f"ETF tracking: eastmoney direct unavailable: {direct_exc}", flush=True)
+        try:
+            import akshare as ak
+            df = ak.fund_etf_spot_em()
+            if df is None or getattr(df, 'empty', True):
+                rows = []
+            else:
+                rows = [
+                    {
+                        'f12': _row_value(row, 0, '代码'),
+                        'f14': _row_value(row, 1, '名称'),
+                        'f2': _row_value(row, 2, '最新价'),
+                        'f441': _row_value(row, 3, 'IOPV实时估值'),
+                        'f402': _row_value(row, 4, '折价率'),
+                        'f4': _row_value(row, 5, '涨跌额'),
+                        'f3': _row_value(row, 6, '涨跌幅'),
+                        'f5': _row_value(row, 7, '成交量'),
+                        'f6': _row_value(row, 8, '成交额'),
+                        'f8': _row_value(row, 14, '换手率'),
+                        'f38': _row_value(row, 32, '最新份额'),
+                        'f20': _row_value(row, 34, '总市值'),
+                        'f124': _row_value(row, 36, '更新时间'),
+                    }
+                    for _, row in df.head(limit).iterrows()
+                ]
+                source = 'akshare.eastmoney'
+        except Exception as ak_exc:
+            raise RuntimeError(f"eastmoney and akshare unavailable: {direct_exc}; {ak_exc}")
+
+    if not rows:
+        return 0
+
+    saved = 0
+    now = datetime.now()
+    for row in rows[:limit]:
+        code = _normalize_fund_code(row.get('f12') if isinstance(row, dict) else _row_value(row, 0, '代码'))
+        if not code:
+            continue
+
+        record = db.query(FundEtfTracking).filter(FundEtfTracking.fund_code == code).first()
+        if not record:
+            record = FundEtfTracking(fund_code=code)
+            db.add(record)
+
+        record.fund_name = str(row.get('f14') or record.fund_name or '')
+        record.latest_price = _to_float(row.get('f2'))
+        record.iopv = _to_float(row.get('f441'))
+        record.discount_rate = _to_float(row.get('f402'))
+        record.change_amount = _to_float(row.get('f4'))
+        record.change_percent = _to_float(row.get('f3'))
+        record.volume = _to_float(row.get('f5'))
+        record.amount = _to_float(row.get('f6'))
+        record.turnover_rate = _to_float(row.get('f8'))
+        record.fund_share = _to_float(row.get('f38'))
+        record.market_value = _to_float(row.get('f20'))
+        record.trade_time = _parse_etf_trade_time(row.get('f124')) or now
+        record.source = source
+        record.detail_json = _json_dumps({
+            'fields': field_names.split(','),
+        })
+        record.updated_time = now
+        saved += 1
+
+    return saved
+
+
+def _build_etf_tracking_from_cache(limit=80):
+    funds = []
+    for fund in getattr(fund_list_cache, 'fund_list', []) or []:
+        name = fund.get('NAME') or fund.get('name') or ''
+        code = _normalize_fund_code(fund.get('CODE') or fund.get('code'))
+        if code and 'ETF' in name.upper():
+            funds.append({
+                'fund_code': code,
+                'fund_name': name,
+                'fund_type': 'ETF',
+                'estimate_change': None,
+                'return_1y': None,
+                'nav_date': None,
+                'source': 'fund_list_cache',
+            })
+
+    return {
+        'items': funds[:limit],
+        'categories': [],
+        'summary': {
+            'total': len(funds),
+            'with_estimate': 0,
+            'avg_estimate_change': None,
+            'positive_estimate_rate': None,
+            'net_flow_available': False,
+            'source': 'fund_list_cache',
+            'stale': True,
+            'net_flow_note': '已从本地基金列表识别 ETF 池；实时行情需要刷新 AkShare/东方财富快照后显示。',
+        },
+    }
+
+
+def _build_etf_tracking_snapshot(db, limit=80, refresh=False):
+    source_error = None
+    if refresh or db.query(FundEtfTracking).count() == 0:
+        try:
+            _refresh_etf_tracking_from_akshare(db, limit=max(limit, 300))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            source_error = str(exc)
+            print(f"ETF tracking: akshare unavailable: {exc}", flush=True)
+
+    rows = db.query(FundEtfTracking).order_by(
+        desc(FundEtfTracking.change_percent)
+    ).limit(limit).all()
+    if not rows:
+        payload = _build_etf_tracking_from_cache(limit=limit)
+        payload['summary']['source_error'] = source_error
+        return payload
+
+    items = []
+    for row in rows:
+        items.append({
+            'fund_code': row.fund_code,
+            'fund_name': row.fund_name,
+            'fund_type': 'ETF',
+            'latest_price': row.latest_price,
+            'iopv': row.iopv,
+            'discount_rate': row.discount_rate,
+            'estimate_change': row.change_percent,
+            'change_percent': row.change_percent,
+            'change_amount': row.change_amount,
+            'volume': row.volume,
+            'amount': row.amount,
+            'turnover_rate': row.turnover_rate,
+            'fund_share': row.fund_share,
+            'market_value': row.market_value,
+            'return_1y': None,
+            'nav_date': row.trade_time.date().isoformat() if row.trade_time else None,
+            'updated_time': row.updated_time.isoformat() if row.updated_time else None,
+            'source': row.source,
+        })
+
+    categories = {}
+    for item in items:
+        name = item.get('fund_name') or ''
+        if any(word in name for word in ['债', '货币']):
+            category = '债券/货币 ETF'
+        elif any(word in name for word in ['港', '纳斯达克', '标普', '日经', '德国', 'QDII']):
+            category = '跨境 ETF'
+        elif any(word in name for word in ['黄金', '商品', '能源', '豆粕']):
+            category = '商品 ETF'
+        elif any(word in name for word in ['医药', '消费', '芯片', '半导体', '证券', '银行', '军工', 'AI', '机器人']):
+            category = '行业主题 ETF'
+        else:
+            category = '宽基/普通指数 ETF'
+        stat = categories.setdefault(category, {'category': category, 'count': 0, 'estimate_values': []})
+        stat['count'] += 1
+        stat['estimate_values'].append(item.get('estimate_change'))
+
+    category_items = [
+        {
+            'category': stat['category'],
+            'count': stat['count'],
+            'estimate_change_avg': _avg(stat['estimate_values']),
+            'return_1y_median': None,
+            'net_flow': None,
+        }
+        for stat in categories.values()
+    ]
+    category_items.sort(key=lambda item: item['count'], reverse=True)
+
+    latest_update = max((item.get('updated_time') for item in items if item.get('updated_time')), default=None)
+    return {
+        'items': items,
+        'categories': category_items,
+        'summary': {
+            'total': db.query(FundEtfTracking).count(),
+            'with_estimate': sum(1 for item in items if item.get('estimate_change') is not None),
+            'avg_estimate_change': _avg(item.get('estimate_change') for item in items),
+            'positive_estimate_rate': _positive_rate(item.get('estimate_change') for item in items),
+            'net_flow_available': False,
+            'source': 'funds.db:fund_etf_tracking',
+            'source_error': source_error,
+            'latest_update': latest_update,
+            'net_flow_note': 'ETF 实时行情来自 AkShare/东方财富免费源；资金净流入暂未接入，当前展示涨跌、成交、IOPV 和份额快照。',
+        },
+    }
+
+
+def _build_research_etf_tracking(db, limit=80):
+    rows = _research_base_rows(db)
+    etf_items = []
+    for basic, risk, rank, estimate in rows:
+        if _fund_type_matches(basic.fund_type, basic.fund_name, ["ETF", "交易型开放式指数", "指数"]):
+            etf_items.append(_research_fund_row(basic, risk, rank, estimate))
+
+    etf_items.sort(
+        key=lambda item: (
+            item.get("estimate_change") if item.get("estimate_change") is not None else -999,
+            item.get("return_1y") if item.get("return_1y") is not None else -999,
+        ),
+        reverse=True,
+    )
+    snapshot_count = db.query(FundEtfTracking).count()
+    estimate_count = sum(1 for item in etf_items if item.get("estimate_change") is not None)
+    if snapshot_count > 0 or not etf_items or estimate_count < max(5, int(len(etf_items) * 0.05)):
+        return _build_etf_tracking_snapshot(db, limit=limit)
+
+    category_stats = {}
+    for item in etf_items:
+        name = item.get("fund_name") or ""
+        fund_type = item.get("fund_type") or ""
+        if "债" in name or "债" in fund_type:
+            category = "债券ETF/指数"
+        elif "港" in name or "QDII" in fund_type.upper() or "纳斯达克" in name or "标普" in name:
+            category = "跨境ETF/指数"
+        elif "黄金" in name or "商品" in name:
+            category = "商品ETF/指数"
+        elif "行业" in fund_type or any(word in name for word in ["医药", "消费", "芯片", "半导体", "证券", "银行", "军工"]):
+            category = "行业主题ETF/指数"
+        else:
+            category = "宽基/普通指数"
+        stat = category_stats.setdefault(category, {"category": category, "count": 0, "estimate_values": [], "return_1y_values": []})
+        stat["count"] += 1
+        stat["estimate_values"].append(item.get("estimate_change"))
+        stat["return_1y_values"].append(item.get("return_1y"))
+
+    categories = []
+    for stat in category_stats.values():
+        categories.append({
+            "category": stat["category"],
+            "count": stat["count"],
+            "estimate_change_avg": _avg(stat["estimate_values"]),
+            "return_1y_median": _median(stat["return_1y_values"]),
+            "net_flow": None,
+        })
+    categories.sort(key=lambda item: item["count"], reverse=True)
+
+    return {
+        "items": etf_items[:limit],
+        "categories": categories,
+        "summary": {
+            "total": len(etf_items),
+            "with_estimate": sum(1 for item in etf_items if item.get("estimate_change") is not None),
+            "avg_estimate_change": _avg(item.get("estimate_change") for item in etf_items),
+            "positive_estimate_rate": _positive_rate(item.get("estimate_change") for item in etf_items),
+            "net_flow_available": False,
+            "net_flow_note": "当前数据源尚未接入 ETF 日/周/月资金净流入，第一版展示估值、净值和收益跟踪。",
+        },
+    }
+
+
+def _build_research_sector_summary(limit=50):
+    try:
+        payload = get_data_service_client().get_market_sectors()
+        data = payload.get('data', {}) if isinstance(payload, dict) else {}
+        rows = data.get('items', []) if isinstance(data, dict) else []
+    except Exception as exc:
+        print(f"research sector summary: DataService unavailable: {exc}")
+        try:
+            fallback = get_fund_master_service().get_sector_rank(limit=limit)
+            fallback_rows = fallback.get('data', []) if isinstance(fallback, dict) else []
+            rows = [
+                {
+                    'code': item.get('code') or '',
+                    'name': item.get('name') or '',
+                    'changePercent': item.get('raw_change', item.get('change_pct')),
+                    'mainNetInflow': item.get('raw_main_inflow', item.get('main_inflow')),
+                }
+                for item in fallback_rows
+                if isinstance(item, dict)
+            ]
+        except Exception as fallback_exc:
+            print(f"research sector summary: fallback unavailable: {fallback_exc}")
+            rows = []
+
+    items = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        change = _to_float(row.get('changePercent'))
+        inflow = _to_float(row.get('mainNetInflow'))
+        if change is None:
+            mood = 'unknown'
+            summary = '暂无涨跌幅数据'
+        elif change >= 2:
+            mood = 'strong'
+            summary = '强势上涨，短线热度较高'
+        elif change >= 0:
+            mood = 'positive'
+            summary = '温和上涨，表现好于弱势板块'
+        elif change <= -2:
+            mood = 'weak'
+            summary = '明显回调，注意波动风险'
+        else:
+            mood = 'negative'
+            summary = '小幅回落，走势偏弱'
+
+        flow_summary = ''
+        if inflow is not None:
+            if inflow > 0:
+                flow_summary = '，主力资金净流入'
+            elif inflow < 0:
+                flow_summary = '，主力资金净流出'
+
+        items.append({
+            'code': row.get('code') or '',
+            'name': row.get('name') or '',
+            'change_percent': change,
+            'main_net_inflow': inflow,
+            'mood': mood,
+            'summary': f"{summary}{flow_summary}",
+        })
+
+    top_gainers = sorted(
+        [item for item in items if item.get('change_percent') is not None],
+        key=lambda item: item['change_percent'],
+        reverse=True,
+    )[:8]
+    top_losers = sorted(
+        [item for item in items if item.get('change_percent') is not None],
+        key=lambda item: item['change_percent'],
+    )[:8]
+    inflow_leaders = sorted(
+        [item for item in items if item.get('main_net_inflow') is not None],
+        key=lambda item: item['main_net_inflow'],
+        reverse=True,
+    )[:8]
+
+    return {
+        'items': items,
+        'top_gainers': top_gainers,
+        'top_losers': top_losers,
+        'inflow_leaders': inflow_leaders,
+        'summary': {
+            'total': len(items),
+            'strong_count': sum(1 for item in items if item.get('mood') == 'strong'),
+            'positive_count': sum(1 for item in items if item.get('change_percent') is not None and item['change_percent'] >= 0),
+            'negative_count': sum(1 for item in items if item.get('change_percent') is not None and item['change_percent'] < 0),
+        },
+    }
+
+
+@app.route('/api/research/market-stats', methods=['GET'])
+def get_research_market_stats():
+    db = get_db()
+    return jsonify(_build_research_market_stats(db))
+
+
+@app.route('/api/research/fund-dashboard', methods=['GET'])
+def get_research_fund_dashboard():
+    db = get_db()
+    limit = request.args.get('limit', 5, type=int)
+    return jsonify(_build_research_fund_dashboard(db, limit=max(1, min(limit, 20))))
+
+
+@app.route('/api/research/etf-tracking', methods=['GET'])
+def get_research_etf_tracking():
+    db = get_db()
+    limit = request.args.get('limit', 80, type=int)
+    refresh = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+    if refresh:
+        return jsonify(_build_etf_tracking_snapshot(db, limit=max(10, min(limit, 300)), refresh=True))
+    return jsonify(_build_research_etf_tracking(db, limit=max(10, min(limit, 300))))
+
+
+@app.route('/api/research/sector-summary', methods=['GET'])
+def get_research_sector_summary():
+    limit = request.args.get('limit', 50, type=int)
+    return jsonify(_build_research_sector_summary(limit=max(10, min(limit, 200))))
+
+
+@app.route('/api/research/industry-performance', methods=['GET'])
+def get_research_industry_performance():
+    db = get_db()
+    if db.query(FundIndustryPerformance).count() == 0:
+        try:
+            rebuild_industry_performance_stats(db)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify(_industry_performance_payload(db))
+
+
+@app.route('/api/research/rebuild-industry-performance', methods=['POST'])
+def rebuild_research_industry_performance():
+    db = get_db()
+    try:
+        total = rebuild_industry_performance_stats(db)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({
+        'success': True,
+        'total': total,
+        'data': _industry_performance_payload(db),
+    })
+
+
+@app.route('/api/research/dashboard', methods=['GET'])
+def get_research_dashboard():
+    db = get_db()
+    limit = request.args.get('limit', 5, type=int)
+    etf_limit = request.args.get('etf_limit', 80, type=int)
+    if db.query(FundIndustryPerformance).count() == 0:
+        try:
+            rebuild_industry_performance_stats(db)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            print(f"research dashboard industry performance rebuild failed: {exc}")
+    return jsonify({
+        "market_stats": _build_research_market_stats(db),
+        "fund_dashboard": _build_research_fund_dashboard(db, limit=max(1, min(limit, 20))),
+        "etf_tracking": _build_research_etf_tracking(db, limit=max(10, min(etf_limit, 300))),
+        "industry_performance": _industry_performance_payload(db),
+        "updated_at": datetime.now().isoformat(),
+        "data_source": {
+            "primary": "funds.db",
+            "industry_performance": "funds.db fund industry tags + screening performance",
+            "etf_net_flow": "not_available",
+        },
+    })
 
 def preload_services():
     """

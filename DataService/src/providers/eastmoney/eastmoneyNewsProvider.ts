@@ -19,7 +19,7 @@ export class EastMoneyNewsProvider implements NewsProvider {
           summary: toNullableString(item.digest ?? item.summary),
           url: toNullableString(item.url),
           source: '东方财富',
-          publishedAt: toNullableString(item.showtime ?? item.time ?? item.ctime),
+          publishedAt: formatNewsTime(item.showtime ?? item.time ?? item.ctime),
         }))
         .filter((item) => item.title);
 
@@ -35,8 +35,13 @@ export class BaiduNewsProvider implements NewsProvider {
 
   async flashNews(count = 30): Promise<NewsListDto> {
     try {
-      const url = `https://finance.pae.baidu.com/selfselect/expressnews?rn=${count}&pn=0&tag=A股&finClientType=pc`;
-      const payload = await fetchJson(url);
+      const params = new URLSearchParams({
+        rn: String(count),
+        pn: '0',
+        tag: 'A股',
+        finClientType: 'pc',
+      });
+      const payload = await fetchJson(`https://finance.pae.baidu.com/selfselect/expressnews?${params.toString()}`);
 
       if (payload.ResultCode !== '0') {
         return { items: [] };
@@ -58,7 +63,7 @@ export class BaiduNewsProvider implements NewsProvider {
             summary: toNullableString(item.evaluate),
             url: toNullableString(item.url),
             source: '百度股市通',
-            publishedAt: toNullableString(item.publish_time),
+            publishedAt: formatNewsTime(item.publish_time),
           };
         })
         .filter((item) => item.title);
@@ -97,7 +102,7 @@ export class ClsNewsProvider implements NewsProvider {
           summary: toNullableString(item.brief ?? item.summary),
           url: toNullableString(item.url),
           source: '财联社',
-          publishedAt: toNullableString(item.ctime ?? item.time ?? item.created_at),
+          publishedAt: formatNewsTime(item.ctime ?? item.time ?? item.created_at),
         }))
         .filter((item) => item.title);
 
@@ -115,6 +120,25 @@ function toString(value: unknown): string {
 function toNullableString(value: unknown): string | null {
   if (value == null || value === '') return null;
   return String(value);
+}
+
+function formatNewsTime(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' || /^\d+$/.test(String(value))) {
+    let ts = Number(value);
+    if (!Number.isFinite(ts)) return null;
+    if (ts > 10_000_000_000) ts = Math.floor(ts / 1000);
+    return new Date(ts * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  }
+
+  const text = String(value).trim();
+  if (/^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{1,2}/.test(text)) {
+    return text.split(':').length >= 3 ? text : `${text}:00`;
+  }
+  if (/^\d{1,2}:\d{1,2}/.test(text)) {
+    return `${new Date().toISOString().slice(0, 10)} ${text}:00`;
+  }
+  return text;
 }
 
 function getNested(obj: Record<string, unknown>, keys: string[], fallback: unknown): unknown {

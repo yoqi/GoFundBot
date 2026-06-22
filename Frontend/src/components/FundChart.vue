@@ -143,30 +143,53 @@ export default {
         const now = new Date()
         let startDate = new Date(0)
 
+        // Compute start date without mutating `now`
+        const nowTs = now.getTime()
         if (range === '3m') {
-            startDate = new Date(now.setMonth(now.getMonth() - 3))
+            const d = new Date(nowTs)
+            d.setMonth(d.getMonth() - 3)
+            startDate = d
         } else if (range === '6m') {
-            startDate = new Date(now.setMonth(now.getMonth() - 6))
+            const d = new Date(nowTs)
+            d.setMonth(d.getMonth() - 6)
+            startDate = d
         } else if (range === '1y') {
-            startDate = new Date(now.setFullYear(now.getFullYear() - 1))
+            const d = new Date(nowTs)
+            d.setFullYear(d.getFullYear() - 1)
+            startDate = d
         } else if (range === '3y') {
-            startDate = new Date(now.setFullYear(now.getFullYear() - 3))
+            const d = new Date(nowTs)
+            d.setFullYear(d.getFullYear() - 3)
+            startDate = d
         }
-        
+
+        const startTs = startDate.getTime()
+
         // 支持新格式: [{date: '2024-01-01', value: 1.23}]
-        if (data.length > 0 && data[0].date !== undefined) {
+        if (data.length > 0 && data[0] && data[0].date !== undefined && typeof data[0].date === 'string') {
             return data
-                .map(item => [new Date(item.date).getTime(), item.value])
-                .filter(item => item[0] >= startDate.getTime())
+                .map(item => {
+                    const ts = new Date(item.date).getTime()
+                    if (isNaN(ts)) return null
+                    return [ts, item.value]
+                })
+                .filter(item => item !== null && item[0] >= startTs)
         }
         // 旧格式: [[timestamp, value]]
-        return data.filter(item => item[0] >= startDate.getTime())
+        return data.filter(item => {
+            if (!item || item.length < 2) return false
+            const ts = item[0]
+            if (typeof ts !== 'number' || isNaN(ts)) return false
+            return ts >= startTs
+        })
     }
 
     const processData = () => {
-        const rawData = (props.netWorthTrend || []).map(item => [item.x, item.y]);
+        const rawData = (props.netWorthTrend || [])
+            .filter(item => item && typeof item.x === 'number' && !isNaN(item.x) && typeof item.y === 'number' && !isNaN(item.y))
+            .map(item => [item.x, item.y]);
         const filtered = filterByDate(rawData, selectedRange.value).slice().sort((a, b) => a[0] - b[0]);
-        
+
         if (filtered.length === 0) return { netWorth: [], drawdownInfo: null }
 
         const startVal = filtered[0][1]
@@ -424,7 +447,8 @@ export default {
           }
       }
 
-      chartInstance.setOption(option)
+      chartInstance.setOption(option, true)  // notMerge=true for clean state
+      chartInstance.resize()                // ensure proper sizing after data update
     }
 
     onMounted(() => {

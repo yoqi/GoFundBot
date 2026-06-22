@@ -50,6 +50,13 @@
             >
               📊 估值与持仓
             </button>
+            <button 
+              class="mode-btn" 
+              :class="{ active: viewMode === 'research' }"
+              @click="navigateToMode('research')"
+            >
+              投研看板
+            </button>
           </div>
         </div>
       </div>
@@ -99,7 +106,7 @@
       <!-- 其他模式 -->
       <div v-else class="main-layout">
         <!-- 左侧：自选列表 (筛选和估值持仓看板模式不显示) -->
-        <aside class="sidebar-left" v-if="viewMode !== 'screening' && viewMode !== 'portfolio'">
+        <aside class="sidebar-left" v-if="viewMode !== 'screening' && viewMode !== 'portfolio' && viewMode !== 'research'">
           <FundWatchlist 
             @view-fund="handleFundSelected" 
             @add-to-compare="handleAddToCompare"
@@ -111,7 +118,7 @@
         </aside>
         
         <!-- 右侧：根据模式显示不同内容 -->
-        <div class="content-area" :class="{ 'full-width': viewMode === 'screening' || viewMode === 'portfolio' }">
+        <div class="content-area" :class="{ 'full-width': viewMode === 'screening' || viewMode === 'portfolio' || viewMode === 'research' }">
           <!-- 筛选模式 -->
           <template v-if="viewMode === 'screening'">
             <FundScreening 
@@ -123,6 +130,11 @@
           <!-- 估值与持仓一体化看板 -->
           <template v-else-if="viewMode === 'portfolio'">
             <FundRealtime @view-detail="handleRealtimeFundView" />
+          </template>
+
+          <!-- 投研看板 -->
+          <template v-else-if="viewMode === 'research'">
+            <ResearchDashboard @view-fund="handleResearchFundView" />
           </template>
           
           <!-- 回测模式 -->
@@ -161,6 +173,7 @@ import FundComparison from './components/FundComparison.vue'
 import FundScreening from './components/FundScreening.vue'
 import FundBacktest from './components/FundBacktest.vue'
 import FundRealtime from './components/FundRealtime.vue'
+import ResearchDashboard from './components/ResearchDashboard.vue'
 import MarketOverview from './components/MarketOverview.vue'
 import FlashNews from './components/FlashNews.vue'
 import SectorRank from './components/SectorRank.vue'
@@ -175,6 +188,7 @@ export default {
     FundScreening,
     FundBacktest,
     FundRealtime,
+    ResearchDashboard,
     MarketOverview,
     FlashNews,
     SectorRank
@@ -287,6 +301,13 @@ export default {
       viewMode.value = 'dashboard'
       selectedFundCode.value = normalizeFundCode(fundOrCode)
     }
+
+    const handleResearchFundView = (fundOrCode) => {
+      pushCurrentState()
+      compareMode.value = false
+      viewMode.value = 'dashboard'
+      selectedFundCode.value = normalizeFundCode(fundOrCode)
+    }
     
     // 添加基金到对比列表
     const handleAddToCompare = (fund) => {
@@ -355,6 +376,7 @@ export default {
       handleDashboardFundView,
       handleScreeningFundView,
       handleRealtimeFundView,
+      handleResearchFundView,
       handleAddToCompare,
       handleRemoveFromCompare,
       handleClearCompare,
@@ -600,12 +622,56 @@ export default {
 .dashboard-right {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 12px;
   position: sticky;
   top: 80px;
-  height: fit-content;
-  max-height: calc(100vh - 100px);
+  height: calc(100vh - 100px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dashboard-right .flash-news-container,
+.dashboard-right .sector-rank-container {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+
+.dashboard-right .sector-rank-container {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.dashboard-right .sector-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dashboard-right .sector-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
+  gap: 6px;
+}
+
+.dashboard-right .sector-item {
+  padding: 7px 10px;
+}
+
+.dashboard-right .filter-panel,
+.dashboard-right .overview-bar {
+  flex-shrink: 0;
+  margin-bottom: 8px;
+}
+
+.dashboard-right .update-time {
+  flex-shrink: 0;
 }
 
 /* ==================== 原有布局 ==================== */

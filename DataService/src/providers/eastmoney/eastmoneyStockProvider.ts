@@ -11,7 +11,7 @@ export class EastMoneyStockProvider implements StockProvider {
     const normalized = normalizeStockCode(code);
     const secid = toEastMoneySecid(normalized);
     const params = new URLSearchParams({
-      fields: 'f57,f58,f107,f12,f14,f13',
+      fields: 'f57,f58,f107,f12,f14,f13,f127,f128,f129',
       secid,
     });
     const payload = await fetchJson(`https://push2.eastmoney.com/api/qt/stock/get?${params.toString()}`);
@@ -28,15 +28,21 @@ export class EastMoneyStockProvider implements StockProvider {
       name: toStringValue(record.f58 || record.f14 || stockCode),
       market,
       symbol: market === 'SH' ? `sh${stockCode}` : market === 'SZ' ? `sz${stockCode}` : stockCode,
+      industry: emptyToNull(record.f127),
+      region: emptyToNull(record.f128),
+      concepts: splitConcepts(record.f129),
     };
   }
 }
 
 function normalizeStockCode(code: string): string {
-  return code.trim().replace(/^(sh|sz)/i, '');
+  return code.trim().replace(/^(sh|sz|hk)/i, '').replace(/\.(SH|SZ|HK)$/i, '');
 }
 
 function toEastMoneySecid(code: string): string {
+  if (/^\d{5}$/.test(code)) {
+    return `116.${code}`;
+  }
   if (/^6|^9/.test(code)) {
     return `1.${code}`;
   }
@@ -44,6 +50,9 @@ function toEastMoneySecid(code: string): string {
 }
 
 function inferMarket(rawMarket: string, code: string): string {
+  if (rawMarket === '116' || /^\d{5}$/.test(code)) {
+    return 'HK';
+  }
   if (rawMarket === '1' || /^6|^9/.test(code)) {
     return 'SH';
   }
@@ -55,4 +64,16 @@ function inferMarket(rawMarket: string, code: string): string {
 
 function toStringValue(value: unknown): string {
   return value == null ? '' : String(value);
+}
+
+function emptyToNull(value: unknown): string | null {
+  const text = toStringValue(value).trim();
+  return text ? text : null;
+}
+
+function splitConcepts(value: unknown): string[] {
+  return toStringValue(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }

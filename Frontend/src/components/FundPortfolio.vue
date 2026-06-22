@@ -11,7 +11,8 @@
             <span class="col-rank">排名</span>
             <span class="col-code">代码</span>
             <span class="col-name">名称</span>
-            <span class="col-market">交易所</span>
+            <span v-if="hasRatioData" class="col-ratio">占比</span>
+            <span class="col-industry">行业</span>
           </div>
           <div
             v-for="(stock, index) in stockList"
@@ -23,7 +24,8 @@
             <span class="col-rank">{{ index + 1 }}</span>
             <span class="col-code">{{ stock.code }}</span>
             <span class="col-name">{{ stock.name }}</span>
-            <span class="col-market">{{ stock.market || '--' }}</span>
+            <span v-if="hasRatioData" class="col-ratio">{{ formatRatio(stock.ratio) }}</span>
+            <span class="col-industry" :title="stock.industryText">{{ stock.industryText }}</span>
           </div>
         </div>
         <div v-else class="no-data">
@@ -50,10 +52,23 @@ export default {
     // 解析持仓数据
     const parseHoldings = (codes) => {
       if (!codes || !Array.isArray(codes)) return []
+
+      const displayIndustry = (item = {}) => {
+        return item.industry || item.industry_name || item.industryName || item.sector || item.sector_name || '未识别'
+      }
+
+      const normalizeRatio = (value) => {
+        const num = Number(String(value ?? '').replace('%', ''))
+        return Number.isFinite(num) && num > 0 ? num : null
+      }
       
       // 如果数据已经是对象列表(新格式)，直接返回
       if (codes.length > 0 && typeof codes[0] === 'object' && codes[0] !== null) {
-        return codes
+        return codes.map(item => ({
+          ...item,
+          ratio: normalizeRatio(item.ratio ?? item.position ?? item.hold_ratio),
+          industryText: displayIndustry(item)
+        }))
       }
 
       const holdings = []
@@ -63,8 +78,8 @@ export default {
           holdings.push({
             code: codes[i],
             name: codes[i + 1],
-            ratio: parseFloat(codes[i + 2]) || 0,
-            market: '--'
+            ratio: normalizeRatio(codes[i + 2]),
+            industryText: '未识别'
           })
         }
       }
@@ -79,10 +94,18 @@ export default {
     })
 
     const hasStockData = computed(() => stockList.value.length > 0)
+    const hasRatioData = computed(() => stockList.value.some(stock => Number(stock.ratio) > 0))
+
+    const formatRatio = (value) => {
+      const num = Number(value)
+      return Number.isFinite(num) && num > 0 ? `${num.toFixed(2)}%` : '-'
+    }
 
     return {
       stockList,
-      hasStockData
+      hasStockData,
+      hasRatioData,
+      formatRatio
     }
   }
 }
@@ -190,6 +213,7 @@ export default {
 
 .col-name {
   flex: 1;
+  min-width: 88px;
   color: #333;
   font-weight: 500;
   padding-right: 8px;
@@ -198,12 +222,24 @@ export default {
   white-space: nowrap;
 }
 
-.col-market {
+.col-ratio {
   width: 56px;
+  color: #666;
+  font-size: 11px;
+  text-align: right;
+  padding-right: 10px;
+  flex-shrink: 0;
+}
+
+.col-industry {
+  width: 76px;
   text-align: left;
   color: #888;
   font-size: 11px;
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .no-data {

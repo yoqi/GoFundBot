@@ -16,6 +16,13 @@
             <span class="star-icon">{{ isInWatchlist ? '★' : '☆' }}</span>
             <span class="btn-text">{{ isInWatchlist ? '已自选' : '自选' }}</span>
           </button>
+          <span
+            v-if="fundIndustryTag"
+            class="industry-tag"
+            :title="industryTagTitle"
+          >
+            行业 {{ fundIndustryTag.name }}
+          </span>
         </div>
 
         <!-- 风险指标区域 (移至此处) -->
@@ -164,6 +171,20 @@ export default {
       const num = parseFloat(value)
       if (isNaN(num)) return '--'
       return (num > 0 ? '+' : '') + num.toFixed(2) + '%'
+    },
+    fundIndustryTag() {
+      return this.fundInfo?.fund_industry_tag || this.fundInfo?.portfolio?.industry_tag || null
+    },
+    industryTagTitle() {
+      const tag = this.fundIndustryTag
+      if (!tag) return ''
+      if (tag.basis === 'mixed') {
+        return '按基金重仓股分类：没有任何行业达到 3 只重仓股，归为混合型'
+      }
+      const basis = tag.basis === 'ratio' && tag.ratio > 0
+        ? `重仓占比 ${tag.ratio}%`
+        : `重仓股 ${tag.count || 0} 只`
+      return `按基金重仓股分类：${tag.name}（${basis}）`
     }
   },
   watch: {
@@ -410,6 +431,24 @@ export default {
 
 .watchlist-btn.in-watchlist:hover:not(:disabled) {
   background: rgba(255, 215, 0, 0.4);
+}
+
+.industry-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 160px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  backdrop-filter: blur(10px);
 }
 
 .star-icon {

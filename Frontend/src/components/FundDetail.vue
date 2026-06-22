@@ -429,31 +429,40 @@ export default {
     // 处理净值走势数据格式
     const processedNetWorthTrend = computed(() => {
       if (!fundDetail.value?.net_worth_trend) return []
-      
+
       try {
         // 处理不同的数据格式
         const trend = fundDetail.value.net_worth_trend
         if (Array.isArray(trend) && trend.length > 0) {
           // 新格式: [{date: '2024-01-01', net_worth: 1.23}]
           if (trend[0].date && trend[0].net_worth !== undefined) {
-            return trend.map(item => ({
-              x: new Date(item.date).getTime(),
-              y: parseFloat(item.net_worth) || 0
-            }))
+            return trend
+              .map(item => {
+                const ts = new Date(item.date).getTime()
+                if (isNaN(ts)) return null  // skip invalid dates
+                const val = parseFloat(item.net_worth)
+                if (isNaN(val)) return null  // skip invalid values
+                return { x: ts, y: val }
+              })
+              .filter(item => item !== null)
           }
           // 旧格式1: [{x: timestamp, y: value}]
-          if (trend[0].x && trend[0].y) {
-            return trend.map(item => ({
-              x: item.x,
-              y: parseFloat(item.y) || 0
-            }))
+          if (trend[0].x && trend[0].y !== undefined) {
+            return trend
+              .filter(item => typeof item.x === 'number' && !isNaN(item.x) && !isNaN(parseFloat(item.y)))
+              .map(item => ({
+                x: item.x,
+                y: parseFloat(item.y) || 0
+              }))
           }
           // 旧格式2: [timestamp, value]
           else if (Array.isArray(trend[0]) && trend[0].length >= 2) {
-            return trend.map(item => ({
-              x: item[0],
-              y: parseFloat(item[1]) || 0
-            }))
+            return trend
+              .filter(item => !isNaN(item[0]) && !isNaN(parseFloat(item[1])))
+              .map(item => ({
+                x: item[0],
+                y: parseFloat(item[1]) || 0
+              }))
           }
         }
         return []
@@ -466,24 +475,26 @@ export default {
     // 处理累计净值走势数据
     const processedAcWorthTrend = computed(() => {
       if (!fundDetail.value?.accumulated_net_worth) return []
-      
+
       try {
         const trend = fundDetail.value.accumulated_net_worth
         if (Array.isArray(trend) && trend.length > 0) {
           // 新格式: [{date: '2024-01-01', position_percentage: 1.23}]
           if (trend[0].date !== undefined) {
-            return trend.map(item => [
-              new Date(item.date).getTime(),
-              parseFloat(item.position_percentage) || 0
-            ])
+            return trend
+              .filter(item => {
+                const ts = new Date(item.date).getTime()
+                return !isNaN(ts) && !isNaN(parseFloat(item.position_percentage))
+              })
+              .map(item => [
+                new Date(item.date).getTime(),
+                parseFloat(item.position_percentage) || 0
+              ])
           }
           // 旧格式: [[timestamp, value]]
-          return trend.map(item => {
-            if (Array.isArray(item) && item.length >= 2) {
-              return [item[0], parseFloat(item[1]) || 0]
-            }
-            return [0, 0]
-          })
+          return trend
+            .filter(item => Array.isArray(item) && item.length >= 2 && !isNaN(item[0]) && !isNaN(parseFloat(item[1])))
+            .map(item => [item[0], parseFloat(item[1]) || 0])
         }
         return []
       } catch (e) {

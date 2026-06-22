@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="fund-screening">
     <!-- 顶部状态栏 -->
     <div class="screening-header">
@@ -17,20 +17,84 @@
         <div class="header-right">
           <button
             class="btn-update"
-            @click="startUpdate"
-            :disabled="updateStatus.running || fillRiskRunning"
-            title="后台更新基金排行数据"
+            @click="openUpdateDialog"
+            :disabled="updateStatus.running"
+            title="选择要执行的更新任务"
           >
             {{ updateStatus.running ? '⏳ 更新中...' : '📥 更新数据' }}
           </button>
-          <button
-            class="btn-fill-risk"
-            @click="startFillRisk"
-            :disabled="updateStatus.running || fillRiskRunning"
-          title="为缺失的基金补充回撤/波动率/夏普/卡玛"
-        >
-          {{ fillRiskRunning ? '⏳ 补充中...' : '🩺 补风险指标' }}
-        </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showUpdateDialog" class="modal-mask" @click.self="closeUpdateDialog">
+      <div class="update-dialog">
+        <div class="dialog-head">
+          <div>
+            <h3>选择更新内容</h3>
+            <p>只执行你这次需要的任务，减少不必要的等待。</p>
+          </div>
+          <button class="dialog-close" @click="closeUpdateDialog">×</button>
+        </div>
+
+        <div class="task-list">
+          <label class="task-item">
+            <input type="checkbox" v-model="updateTasks.basic" />
+            <span>
+              <strong>更新基础数据</strong>
+              <em>拉取基金排行、收益、类型等筛选基础字段</em>
+            </span>
+          </label>
+          <label class="task-item">
+            <input type="checkbox" v-model="updateTasks.rankings" />
+            <span>
+              <strong>计算同类排名</strong>
+              <em>刷新 4433 所需的同类排名百分位</em>
+            </span>
+          </label>
+          <label class="task-item">
+            <input type="checkbox" v-model="updateTasks.risk" />
+            <span>
+              <strong>补充风险指标</strong>
+              <em>拉历史净值计算回撤、波动率、夏普、卡玛</em>
+            </span>
+          </label>
+          <label class="task-item">
+            <input type="checkbox" v-model="updateTasks.industry" />
+            <span>
+              <strong>刷新基金所属板块</strong>
+              <em>先构建股票行业字典，再根据重仓股分类基金；缺口股票会补查接口</em>
+            </span>
+          </label>
+          <label class="task-item">
+            <input type="checkbox" v-model="updateTasks.industry_performance" />
+            <span>
+              <strong>汇总板块走势</strong>
+              <em>按基金所属板块聚合近3月、半年、1年、3年表现</em>
+            </span>
+          </label>
+        </div>
+
+        <div class="dialog-options">
+          <label>
+            <span>基础数据上限</span>
+            <input v-model.number="updateLimit" type="number" min="1" placeholder="留空为全部" />
+          </label>
+          <label>
+            <span>风险指标上限</span>
+            <input v-model.number="preciseLimit" type="number" min="1" />
+          </label>
+          <label>
+            <span>行业刷新上限</span>
+            <input v-model.number="industryLimit" type="number" min="1" placeholder="留空为全部" />
+          </label>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="closeUpdateDialog">取消</button>
+          <button class="btn-update" :disabled="!hasSelectedUpdateTask" @click="startUpdate">
+            开始更新
+          </button>
         </div>
       </div>
     </div>
@@ -143,6 +207,26 @@
             >
               {{ getShortTypeName(t) }} ✕
             </span>
+          </div>
+
+          <div class="industry-filter-block" v-if="industryTags.length">
+            <span class="industry-filter-label">板块筛选</span>
+            <button
+              class="industry-chip"
+              :class="{ active: filters.industry_tags.length === 0 }"
+              @click="clearIndustryTags"
+            >
+              全部
+            </button>
+            <button
+              v-for="tag in industryTags"
+              :key="tag.name"
+              class="industry-chip"
+              :class="{ active: filters.industry_tags.includes(tag.name) }"
+              @click="toggleIndustryTag(tag.name)"
+            >
+              {{ tag.name }} <span>{{ tag.count }}</span>
+            </button>
           </div>
         </div>
 
@@ -295,68 +379,45 @@
       </div>
 
       <!-- 结果表格 -->
-      <div v-else class="results-table-wrapper">
-        <table class="results-table">
-          <thead>
-            <tr>
-              <th class="sticky-col">基金代码</th>
-              <th class="sticky-col-2">基金名称</th>
-              <th>类型</th>
-              <th>近1月</th>
-              <th>近3月</th>
-              <th>近1年</th>
-              <th>最大回撤</th>
-              <th>波动率</th>
-              <th>夏普比率</th>
-              <th>卡玛比率</th>
-              <th>4433</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr 
-              v-for="fund in results" 
-              :key="fund.fund_code"
-              @click="viewFundDetail(fund)"
-              class="clickable-row"
-            >
-              <td class="sticky-col fund-code">{{ fund.fund_code }}</td>
-              <td class="sticky-col-2 fund-name" :title="fund.fund_name">
-                {{ truncateName(fund.fund_name) }}
-              </td>
-              <td>{{ fund.fund_type }}</td>
-              <td :class="getReturnClass(fund.return_1m)">
-                {{ formatPercent(fund.return_1m) }}
-              </td>
-              <td :class="getReturnClass(fund.return_3m)">
-                {{ formatPercent(fund.return_3m) }}
-              </td>
-              <td :class="getReturnClass(fund.return_1y)">
-                {{ formatPercent(fund.return_1y) }}
-              </td>
-              <td class="negative">{{ formatPercent(fund.max_drawdown_1y, true) }}</td>
-              <td>{{ formatPercent(fund.volatility_1y) }}</td>
-              <td :class="getSharpeClass(fund.sharpe_ratio_1y)">
-                {{ formatNumber(fund.sharpe_ratio_1y) }}
-              </td>
-              <td :class="getCalmarClass(fund.calmar_ratio_1y)">
-                {{ formatNumber(fund.calmar_ratio_1y) }}
-              </td>
-              <td>
-                <span v-if="fund.pass_4433" class="pass-badge">✓</span>
-                <span v-else class="fail-badge">-</span>
-              </td>
-              <td class="actions" @click.stop>
-                <button class="btn-action" @click="addToWatchlist(fund)" title="加入自选">
-                  ⭐
-                </button>
-                <button class="btn-action" @click="addToCompare(fund)" title="加入对比">
-                  📊
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-else class="results-table-wrapper vxe-results-wrapper">
+        <vxe-grid
+          ref="screeningGridRef"
+          v-bind="gridOptions"
+          :data="results"
+          :loading="loading"
+          @sort-change="handleGridSort"
+          @cell-click="handleGridCellClick"
+        >
+          <template #fundName="{ row }">
+            <span class="fund-name-cell" :title="row.fund_name">{{ row.fund_name || '--' }}</span>
+          </template>
+          <template #industryTag="{ row }">
+            <span class="industry-cell">{{ row.industry_tag_name || '混合型' }}</span>
+          </template>
+          <template #percent="{ row, column }">
+            <span :class="getReturnClass(row[column.field])">{{ formatPercent(row[column.field]) }}</span>
+          </template>
+          <template #drawdown="{ row }">
+            <span class="negative">{{ formatPercent(row.max_drawdown_1y, true) }}</span>
+          </template>
+          <template #number="{ row, column }">
+            <span>{{ formatNumber(row[column.field]) }}</span>
+          </template>
+          <template #sharpe="{ row }">
+            <span :class="getSharpeClass(row.sharpe_ratio_1y)">{{ formatNumber(row.sharpe_ratio_1y) }}</span>
+          </template>
+          <template #calmar="{ row }">
+            <span :class="getCalmarClass(row.calmar_ratio_1y)">{{ formatNumber(row.calmar_ratio_1y) }}</span>
+          </template>
+          <template #pass4433="{ row }">
+            <span v-if="row.pass_4433" class="pass-badge">✓</span>
+            <span v-else class="fail-badge">-</span>
+          </template>
+          <template #actions="{ row }">
+            <button class="btn-action" @click.stop="addToWatchlist(row)" title="加入自选">★</button>
+            <button class="btn-action" @click.stop="addToCompare(row)" title="加入对比">▦</button>
+          </template>
+        </vxe-grid>
       </div>
 
       <!-- 分页 -->
@@ -429,7 +490,16 @@ export default {
     const updateLimit = ref(null)
     const updateMode = ref('sync_nav')
     const preciseLimit = ref(500)
-    const fillRiskRunning = ref(false)
+    const industryLimit = ref(null)
+    const showUpdateDialog = ref(false)
+    const updateTasks = reactive({
+      basic: true,
+      rankings: true,
+      risk: false,
+      industry: true,
+      industry_performance: true
+    })
+    const hasSelectedUpdateTask = computed(() => Object.values(updateTasks).some(Boolean))
     
     // 高级筛选 — 直观的数值范围
     const showAdvanced = ref(false)
@@ -542,6 +612,7 @@ export default {
     const filters = reactive({
       keyword: '',
       fund_types: [],
+      industry_tags: [],
       return_1y_min: null,
       return_1y_max: null,
       max_drawdown_max: null,
@@ -609,6 +680,8 @@ export default {
     const quickTypeFilter = ref('')
     const availableTypes = ref([])  // 从后端获取可选类型
     const activeQuickDropdown = ref(null)  // 当前打开的下拉菜单
+    const industryTags = ref([])
+    const screeningGridRef = ref(null)
     
     // 快速筛选的多级分类配置
     const quickTypeCategories = [
@@ -704,6 +777,48 @@ export default {
     const results = ref([])
     const loading = ref(false)
     const searched = ref(false)
+
+    const gridOptions = reactive({
+      border: true,
+      stripe: true,
+      showOverflow: true,
+      height: 560,
+      rowConfig: {
+        isHover: true
+      },
+      sortConfig: {
+        remote: true,
+        trigger: 'cell'
+      },
+      toolbarConfig: {
+        export: true,
+        print: true,
+        zoom: true,
+        custom: true
+      },
+      exportConfig: {
+        filename: '基金筛选结果',
+        type: 'csv'
+      },
+      printConfig: {},
+      columns: [
+        { type: 'seq', width: 54, title: '序号', fixed: 'left' },
+        { field: 'fund_code', title: '基金代码', width: 110, sortable: true, fixed: 'left' },
+        { field: 'fund_name', title: '基金名称', minWidth: 190, fixed: 'left', slots: { default: 'fundName' } },
+        { field: 'industry_tag_name', title: '板块', width: 110, sortable: true, slots: { default: 'industryTag' } },
+        { field: 'fund_type', title: '类型', width: 130, sortable: true },
+        { field: 'return_1m', title: '近1月', width: 100, sortable: true, slots: { default: 'percent' } },
+        { field: 'return_3m', title: '近3月', width: 100, sortable: true, slots: { default: 'percent' } },
+        { field: 'return_1y', title: '近1年', width: 100, sortable: true, slots: { default: 'percent' } },
+        { field: 'max_drawdown_1y', title: '最大回撤', width: 110, sortable: true, slots: { default: 'drawdown' } },
+        { field: 'volatility_1y', title: '波动率', width: 100, sortable: true, slots: { default: 'percent' } },
+        { field: 'sharpe_ratio_1y', title: '夏普', width: 90, sortable: true, slots: { default: 'sharpe' } },
+        { field: 'calmar_ratio_1y', title: '卡玛', width: 90, sortable: true, slots: { default: 'calmar' } },
+        { field: 'pass_4433', title: '4433', width: 80, slots: { default: 'pass4433' } },
+        { field: 'updated_time', title: '更新时间', minWidth: 160, sortable: true },
+        { title: '操作', width: 110, fixed: 'right', slots: { default: 'actions' } }
+      ]
+    })
     
     // 进度百分比
     const progressPercent = computed(() => {
@@ -738,9 +853,24 @@ export default {
       }
     }
     
+    const openUpdateDialog = () => {
+      showUpdateDialog.value = true
+    }
+
+    const closeUpdateDialog = () => {
+      if (!updateStatus.value.running) {
+        showUpdateDialog.value = false
+      }
+    }
+
     // 开始更新
     const startUpdate = async () => {
+      if (!hasSelectedUpdateTask.value) {
+        alert('请至少选择一个更新任务')
+        return
+      }
       try {
+        showUpdateDialog.value = false
         updateStatus.value = {
           running: true,
           progress: 0,
@@ -753,8 +883,12 @@ export default {
         await screeningAPI.startUpdate({
           fund_types: selectedFundTypes.value,
           limit: updateLimit.value || null,
-          mode: updateMode.value,
-          precise_limit: updateMode.value === 'sync_only' ? null : (preciseLimit.value || 500)
+          mode: updateTasks.risk ? updateMode.value : 'sync_only',
+          precise_limit: updateTasks.risk ? (preciseLimit.value || 500) : null,
+          industry_limit: industryLimit.value || null,
+          tasks: {
+            ...updateTasks
+          }
         })
         // 开始轮询状态
         startStatusPoll()
@@ -765,28 +899,6 @@ export default {
         } else {
           console.error('启动更新失败:', err)
           alert('启动更新失败')
-        }
-      }
-    }
-    
-    // 补充风险指标
-    const startFillRisk = async () => {
-      if (updateStatus.value.running) {
-        // 已有任务在运行，直接开始轮询
-        startStatusPoll()
-        return
-      }
-      fillRiskRunning.value = true
-      try {
-        await screeningAPI.fillRiskMetrics()
-        startStatusPoll()
-      } catch (err) {
-        fillRiskRunning.value = false
-        if (err.response?.status === 409) {
-          // 后台已有任务，开始轮询即可
-          startStatusPoll()
-        } else {
-          console.error('启动补充失败:', err)
         }
       }
     }
@@ -813,7 +925,6 @@ export default {
         const looksComplete = d.total > 0 && d.progress >= d.total
         if (!d.running && (looksComplete || d.total === 0)) {
           stopStatusPoll()
-          fillRiskRunning.value = false
           fetchDbStatus()
         }
       } catch (err) {
@@ -841,6 +952,7 @@ export default {
       const params = {}
       if (filters.keyword) params.keyword = filters.keyword
       if (filters.fund_types.length) params.fund_types = [...filters.fund_types]
+      if (filters.industry_tags.length) params.industry_tags = [...filters.industry_tags]
       if (quickTypeFilter.value) params.quick_fund_type = quickTypeFilter.value
       // 直接映射 advFilters → 后端字段
       const map = {
@@ -860,8 +972,34 @@ export default {
     const resetFilters = () => {
       filters.keyword = ''
       filters.fund_types = []
+      filters.industry_tags = []
       Object.keys(advFilters).forEach(k => advFilters[k] = null)
       quickTypeFilter.value = ''
+    }
+
+    const fetchIndustryTags = async () => {
+      try {
+        const res = await screeningAPI.getIndustryTags()
+        industryTags.value = res.data.data || []
+      } catch (err) {
+        console.error('加载板块标签失败:', err)
+        industryTags.value = []
+      }
+    }
+
+    const toggleIndustryTag = (name) => {
+      const idx = filters.industry_tags.indexOf(name)
+      if (idx > -1) {
+        filters.industry_tags.splice(idx, 1)
+      } else {
+        filters.industry_tags.push(name)
+      }
+      search(true)
+    }
+
+    const clearIndustryTags = () => {
+      filters.industry_tags = []
+      search(true)
     }
 
     // 搜索
@@ -939,6 +1077,18 @@ export default {
     const changePage = (page) => {
       currentPage.value = page
       search()
+    }
+
+    const handleGridSort = ({ field, order }) => {
+      if (!field || !order) return
+      sortBy.value = field
+      sortOrder.value = order === 'asc' ? 'asc' : 'desc'
+      search(true)
+    }
+
+    const handleGridCellClick = ({ row, column }) => {
+      if (column?.title === '操作') return
+      viewFundDetail(row)
     }
     
     // 查看基金详情
@@ -1027,10 +1177,10 @@ export default {
       await fetchProgress()
       // 再加载完整DB状态（显示基金数量等）
       fetchDbStatus()
+      fetchIndustryTags()
 
       // 如果正在更新，开始轮询
       if (updateStatus.value.running) {
-        fillRiskRunning.value = true
         startStatusPoll()
       }
 
@@ -1055,8 +1205,14 @@ export default {
       updateLimit,
       updateMode,
       preciseLimit,
-      fillRiskRunning,
+      industryLimit,
+      showUpdateDialog,
+      updateTasks,
+      hasSelectedUpdateTask,
       filters,
+      industryTags,
+      screeningGridRef,
+      gridOptions,
       fundTypeCategories,
       sortBy,
       sortOrder,
@@ -1088,17 +1244,22 @@ export default {
       typeDropdownRef,
       toggleSingleType,
       toggleCategoryTypes,
+      toggleIndustryTag,
+      clearIndustryTags,
       isCatAllSelected,
       isCatPartialSelected,
 
       // 方法
       fetchDbStatus,
+      openUpdateDialog,
+      closeUpdateDialog,
       startUpdate,
-      startFillRisk,
       stopUpdate,
       resetFilters,
       search,
       changePage,
+      handleGridSort,
+      handleGridCellClick,
       viewFundDetail,
       addToWatchlist,
       addToCompare,
@@ -1118,14 +1279,8 @@ export default {
       isCategoryTypeActive,
       hasCategoryActiveType
     }
-      isCategoryPartialSelected,
-      openQuickDropdown,
-      closeQuickDropdown,
-      getFilteredCategoryTypes,
-      isCategoryTypeActive,
-      hasCategoryActiveType
-    }
   }
+}
 
 </script>
 
@@ -1370,7 +1525,7 @@ export default {
 }
 
 .btn-update,
-.btn-fill-risk {
+.btn-secondary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1392,18 +1547,136 @@ export default {
 
 .btn-update:hover:not(:disabled) { background: #0958d9; }
 
-.btn-fill-risk {
+.btn-secondary {
   background: #fff;
-  color: #1677ff;
-  border: 1px solid #1677ff;
+  color: #4b5563;
+  border: 1px solid #d1d5db;
 }
 
-.btn-fill-risk:hover:not(:disabled) { background: #f0f5ff; }
+.btn-secondary:hover:not(:disabled) { background: #f9fafb; }
 
 .btn-update:disabled,
-.btn-fill-risk:disabled {
+.btn-secondary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.update-dialog {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 14px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.dialog-head h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  color: #111827;
+}
+
+.dialog-head p {
+  margin: 0;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.dialog-close {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: #f3f4f6;
+  color: #4b5563;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.task-list {
+  display: grid;
+  gap: 8px;
+  padding: 16px 22px;
+}
+
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.task-item input {
+  margin-top: 3px;
+}
+
+.task-item strong {
+  display: block;
+  font-size: 14px;
+  color: #111827;
+}
+
+.task-item em {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dialog-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 22px 16px;
+}
+
+.dialog-options label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dialog-options input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px 20px;
+  border-top: 1px solid #eef2f7;
 }
 
 /* 结果区域 */
@@ -1599,6 +1872,35 @@ export default {
 /* 表格 */
 .results-table-wrapper {
   overflow-x: auto;
+}
+
+.vxe-results-wrapper {
+  overflow: visible;
+}
+
+.fund-name-cell {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+  color: #111827;
+  font-weight: 600;
+}
+
+.industry-cell {
+  display: inline-flex;
+  align-items: center;
+  max-width: 96px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f0f5ff;
+  color: #1677ff;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .results-table {
@@ -1959,6 +2261,43 @@ export default {
 .type-tag-selected:hover {
   background: #e6f0ff;
   border-color: #1677ff;
+}
+
+.industry-filter-block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.industry-filter-label {
+  color: #666;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.industry-chip {
+  border: 1px solid #d9e3f0;
+  border-radius: 999px;
+  background: #fff;
+  color: #4b5563;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+  transition: all 0.2s;
+}
+
+.industry-chip span {
+  margin-left: 4px;
+  color: #9ca3af;
+}
+
+.industry-chip:hover,
+.industry-chip.active {
+  border-color: #1677ff;
+  background: #f0f5ff;
+  color: #1677ff;
 }
 
 /* Advanced toggle */

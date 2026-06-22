@@ -31,13 +31,14 @@ def get_market_overview():
 def get_flash_news():
     """
     获取7x24快讯 – DataService first, legacy fallback
-    GET /api/market/news?count=20
+    GET /api/market/news?count=30&page=1
     """
-    count = request.args.get('count', 20, type=int)
+    count = request.args.get('count', 30, type=int)
+    page = request.args.get('page', 1, type=int)
 
     # 1) Try DataService
     try:
-        ds_payload = get_data_service_client().get_flash_news(count=count)
+        ds_payload = get_data_service_client().get_flash_news(count=count, page=page)
         ds_data = ds_payload.get('data', {}) if isinstance(ds_payload, dict) else {}
         ds_items = ds_data.get('items', []) if isinstance(ds_data, dict) else []
 
@@ -54,16 +55,22 @@ def get_flash_news():
                     'related_stocks': [],
                     'source': item.get('source', ''),
                 })
-            print(f"market news: DataService success, {len(news_list)} items")
+            meta = ds_payload.get('meta', {}) if isinstance(ds_payload.get('meta'), dict) else {}
+            sources = sorted({item.get('source', '') for item in news_list if item.get('source')})
+            print(f"market news: DataService success, {len(news_list)} items (page={page}, total={ds_data.get('total', len(news_list))}, sources={sources})")
             return jsonify({
                 'success': True,
                 'data': news_list,
-                'update_time': ds_data.get('updatedAt', ''),
+                'update_time': meta.get('updatedAt', ''),
+                'total': ds_data.get('total', len(news_list)),
+                'hasMore': ds_data.get('hasMore', False),
+                'sources': sources,
+                'source': meta.get('provider') or 'data_service',
             })
     except DataServiceError as e:
         print(f"market news: DataService unavailable, fallback to legacy: {e}")
 
-    # 2) Fallback to legacy
+    # 2) Fallback to legacy (aggregates 3 sources: Baidu, EastMoney, CLS)
     service = get_fund_master_service()
     return jsonify(service.get_flash_news(count=count))
 
@@ -102,11 +109,21 @@ def get_sector_rank():
                     'raw_change': _safe_float(change_pct),
                     'raw_main_inflow': _safe_float(main_inflow),
                 })
+            if _sector_moves_look_one_sided(sectors):
+                print("market sectors: DataService result looks one-sided, fallback to legacy")
+                raise DataServiceError(
+                    message="DataService sector distribution failed sanity check",
+                    code="DATA_SERVICE_SUSPECT_SECTOR_DATA",
+                    status_code=502,
+                )
+            meta = ds_payload.get('meta', {}) if isinstance(ds_payload.get('meta'), dict) else {}
             print(f"market sectors: DataService success, {len(sectors)} sectors")
             return jsonify({
                 'success': True,
                 'data': sectors,
                 'total_count': len(sectors),
+                'update_time': meta.get('updatedAt', ''),
+                'source': meta.get('provider') or 'data_service',
             })
     except DataServiceError as e:
         print(f"market sectors: DataService unavailable, fallback to legacy: {e}")
@@ -266,6 +283,19 @@ def _fmt_pct(value) -> str:
     """Format a number as a signed percentage string."""
     num = _safe_float(value)
     return f"{'+' if num >= 0 else ''}{num:.2f}%"
+
+
+def _sector_moves_look_one_sided(sectors) -> bool:
+    """Reject obviously suspicious sector snapshots before falling back."""
+    if not sectors or len(sectors) < 20:
+        return False
+    moves = [_safe_float(item.get('raw_change')) for item in sectors]
+    non_zero = [move for move in moves if abs(move) > 0.0001]
+    if len(non_zero) < 10:
+        return True
+    up_count = sum(1 for move in non_zero if move > 0)
+    down_count = sum(1 for move in non_zero if move < 0)
+    return up_count == len(non_zero) or down_count == len(non_zero)
 
 
 def _fmt_amount_yi(value) -> str:
