@@ -1133,13 +1133,23 @@ def _build_cached_response(db: Session, fund_code: str):
         data['scale_fluctuation'] = _json_loads(trend.scale_fluctuation_json, {})
 
     if estimate:
+        display_estimate_change = estimate.estimate_change
+        if _estimate_is_after_nav(estimate.estimate_time, estimate.net_worth_date):
+            try:
+                estimate_nav = float(estimate.estimate_value)
+                official_nav = float(estimate.net_worth)
+                if official_nav:
+                    display_estimate_change = round((estimate_nav - official_nav) / official_nav * 100, 4)
+            except Exception:
+                display_estimate_change = estimate.estimate_change
+
         data['realtime_estimate'] = {
             'name': estimate.name,
             'fund_code': fund_code,
             'net_worth': estimate.net_worth,
             'net_worth_date': estimate.net_worth_date,
             'estimate_value': estimate.estimate_value,
-            'estimate_change': estimate.estimate_change,
+            'estimate_change': _value_to_string(display_estimate_change),
             'estimate_time': estimate.estimate_time
         }
 
@@ -1472,25 +1482,26 @@ def get_fund_detail(fund_code):
             )
             db.add(trend_record)
 
-        estimate_record = db.query(FundEstimate).filter(FundEstimate.fund_code == fund_code).first()
-        if estimate_record:
-            estimate_record.name = estimate.get('name')
-            estimate_record.net_worth = estimate.get('net_worth')
-            estimate_record.net_worth_date = estimate.get('net_worth_date')
-            estimate_record.estimate_value = estimate.get('estimate_value')
-            estimate_record.estimate_change = estimate.get('estimate_change')
-            estimate_record.estimate_time = estimate.get('estimate_time')
-        else:
-            estimate_record = FundEstimate(
-                fund_code=fund_code,
-                name=estimate.get('name'),
-                net_worth=estimate.get('net_worth'),
-                net_worth_date=estimate.get('net_worth_date'),
-                estimate_value=estimate.get('estimate_value'),
-                estimate_change=estimate.get('estimate_change'),
-                estimate_time=estimate.get('estimate_time')
-            )
-            db.add(estimate_record)
+        estimate_result = _upsert_fund_estimate(
+            db,
+            fund_code,
+            name=estimate.get('name'),
+            net_worth=estimate.get('net_worth'),
+            net_worth_date=estimate.get('net_worth_date'),
+            estimate_value=estimate.get('estimate_value'),
+            estimate_change=estimate.get('estimate_change'),
+            estimate_time=estimate.get('estimate_time')
+        )
+        estimate_result = _sync_latest_official_nav(db, fund_code, estimate_result)
+        if isinstance(estimate_result, dict):
+            fund_data['realtime_estimate'] = {
+                **estimate,
+                'net_worth': estimate_result.get('net_worth'),
+                'net_worth_date': estimate_result.get('net_worth_date'),
+                'estimate_value': estimate_result.get('estimate_value'),
+                'estimate_change': estimate_result.get('estimate_change'),
+                'estimate_time': estimate_result.get('estimate_time'),
+            }
 
         portfolio_record = db.query(FundPortfolio).filter(FundPortfolio.fund_code == fund_code).first()
         if portfolio_record:
@@ -1820,10 +1831,13 @@ def get_watchlist():
                         t_date = last.get('date')
                         if t_nw is not None and t_date is not None:
                             trend_change = _trend_daily_return(trend_data)
-                            if not net_worth_date or str(t_date) >= str(net_worth_date):
+                            if not net_worth_date or _normalize_date(t_date) >= _normalize_date(net_worth_date):
                                 net_worth = str(t_nw)
                                 net_worth_date = str(t_date)
-                                if trend_change is not None:
+                                if trend_change is not None and not _estimate_is_after_nav(
+                                    estimate.estimate_time if estimate else None,
+                                    t_date
+                                ):
                                     display_change = _value_to_string(trend_change)
         except Exception:
             pass
@@ -1866,6 +1880,7 @@ def add_to_watchlist():
     fund_name = data.get('fund_name', '')
     fund_type = data.get('fund_type', '')
     group_id = data.get('group_id')  # 可选的分组ID
+    estimate_payload = data.get('estimate') if isinstance(data.get('estimate'), dict) else None
     
     if not fund_code:
         return jsonify({'error': 'Fund code is required'}), 400
@@ -1895,11 +1910,34 @@ def add_to_watchlist():
     
     try:
         db.add(new_item)
+        estimate_result = None
+        if estimate_payload:
+            estimate_result = _upsert_fund_estimate(
+                db,
+                fund_code,
+                name=estimate_payload.get('name') or fund_name,
+                net_worth=_value_to_string(estimate_payload.get('net_worth')),
+                net_worth_date=estimate_payload.get('net_worth_date'),
+                estimate_value=_value_to_string(estimate_payload.get('estimate_value')),
+                estimate_change=_value_to_string(estimate_payload.get('estimate_change')),
+                estimate_time=estimate_payload.get('estimate_time')
+            )
         db.commit()
+        if not estimate_result:
+            try:
+                estimate_db = SessionLocal()
+                try:
+                    estimate_result = _refresh_single_fund_estimate(estimate_db, fund_code)
+                    estimate_db.commit()
+                finally:
+                    estimate_db.close()
+            except Exception as estimate_exc:
+                print(f"add watchlist: initial estimate refresh failed for {fund_code}: {estimate_exc}")
         return jsonify({
             'message': 'Fund added to watchlist',
             'fund_code': fund_code,
-            'sort_order': new_order
+            'sort_order': new_order,
+            'estimate': estimate_result
         }), 201
     except Exception as e:
         db.rollback()
@@ -2131,6 +2169,38 @@ def _value_to_string(value):
     return str(value)
 
 
+def _normalize_date(value):
+    """Normalize a date to YYYY-MM-DD for safe string comparison.
+
+    Handles zero-padding differences (e.g. "2026-6-21" → "2026-06-21")
+    and slash formats (e.g. "2026/06/21" → "2026-06-21").
+    """
+    if not value:
+        return ''
+    text = str(value).strip()
+    match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', text)
+    if match:
+        return '{}-{:02d}-{:02d}'.format(
+            match.group(1),
+            int(match.group(2)),
+            int(match.group(3)),
+        )
+    return text
+
+
+def _extract_date_text(value):
+    if not value:
+        return ''
+    match = re.search(r'\d{4}[-/]\d{1,2}[-/]\d{1,2}', str(value))
+    return match.group(0).replace('/', '-') if match else ''
+
+
+def _estimate_is_after_nav(estimate_time, nav_date):
+    estimate_date = _normalize_date(estimate_time)
+    official_date = _normalize_date(nav_date)
+    return bool(estimate_date and official_date and estimate_date > official_date)
+
+
 def _upsert_fund_estimate(
     db,
     fund_code,
@@ -2146,14 +2216,24 @@ def _upsert_fund_estimate(
     ).first()
 
     if estimate_record:
-        estimate_record.name = name
-        # 只有净值日期更新时才覆盖（防止 fundgz CDN 返回旧数据覆盖新数据）
-        if net_worth_date and (not estimate_record.net_worth_date or str(net_worth_date) >= str(estimate_record.net_worth_date)):
-            estimate_record.net_worth = net_worth
+        if name is not None:
+            estimate_record.name = name
+        # 只有净值日期更新时才覆盖（防止 CDN 返回旧数据覆盖新数据）
+        # 使用 _normalize_date 确保日期比较不受零填充差异影响
+        if net_worth_date is not None and (
+            not estimate_record.net_worth_date
+            or _normalize_date(net_worth_date) >= _normalize_date(estimate_record.net_worth_date)
+        ):
+            if net_worth is not None:
+                estimate_record.net_worth = net_worth
             estimate_record.net_worth_date = net_worth_date
-        estimate_record.estimate_value = estimate_value
-        estimate_record.estimate_change = estimate_change
-        estimate_record.estimate_time = estimate_time
+        # 保护估值字段：仅在提供新值时覆盖，防止 None 擦除已有缓存
+        if estimate_value is not None:
+            estimate_record.estimate_value = estimate_value
+        if estimate_change is not None:
+            estimate_record.estimate_change = estimate_change
+        if estimate_time is not None:
+            estimate_record.estimate_time = estimate_time
     else:
         estimate_record = FundEstimate(
             fund_code=fund_code,
@@ -2200,7 +2280,7 @@ def _latest_nav_from_data_service(fund_code):
         nav = item.get('nav')
         if not date or nav is None:
             continue
-        if latest is None or str(date) > str(latest.get('date')):
+        if latest is None or _normalize_date(date) > _normalize_date(latest.get('date')):
             latest = item
     if not latest:
         return None
@@ -2229,7 +2309,7 @@ def _trend_daily_return(rows):
     if not normalized:
         return None
 
-    normalized.sort(key=lambda item: str(item.get('date') or ''))
+    normalized.sort(key=lambda item: _normalize_date(item.get('date')))
     latest = normalized[-1]
     daily_return = _first_present(latest, ('dailyReturn', 'equityReturn', 'growth_rate'))
     if daily_return is not None:
@@ -2264,7 +2344,7 @@ def _latest_nav_from_fund_trend(db, fund_code):
     if not normalized:
         return None
 
-    normalized.sort(key=lambda item: str(item.get('date') or ''))
+    normalized.sort(key=lambda item: _normalize_date(item.get('date')))
     latest = normalized[-1]
     daily_return = _trend_daily_return(normalized)
 
@@ -2294,16 +2374,20 @@ def _sync_latest_official_nav(db, fund_code, result=None):
 
     latest_date = latest.get('date')
     current_date = estimate.net_worth_date
-    if latest_date and (not current_date or str(latest_date) >= str(current_date)):
-        estimate.net_worth = _value_to_string(latest.get('nav'))
+    if latest_date and (not current_date or _normalize_date(latest_date) >= _normalize_date(current_date)):
+        latest_nav = _value_to_string(latest.get('nav'))
+        if latest_nav is not None:
+            estimate.net_worth = latest_nav
         estimate.net_worth_date = latest_date
-        if latest.get('daily_return') is not None:
+        has_newer_intraday_estimate = _estimate_is_after_nav(estimate.estimate_time, latest_date)
+        if latest.get('daily_return') is not None and not has_newer_intraday_estimate:
             estimate.estimate_change = _value_to_string(latest.get('daily_return'))
 
         if isinstance(result, dict):
             result['net_worth'] = estimate.net_worth
             result['net_worth_date'] = estimate.net_worth_date
-            result['estimate_change'] = estimate.estimate_change
+            if not has_newer_intraday_estimate:
+                result['estimate_change'] = estimate.estimate_change
             result['official_nav_synced'] = True
 
     return result
@@ -2313,7 +2397,7 @@ def _refresh_fundgz_estimate(db, fund_code):
     real_time_url = f"http://fundgz.1234567.com.cn/js/{fund_code}.js"
     response = requests.get(real_time_url, headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }, timeout=3)
+    }, timeout=1.5)
 
     if response.status_code != 200:
         return None
@@ -2341,7 +2425,7 @@ def _refresh_fundgz_estimate(db, fund_code):
                     t_nw = last.get('net_worth')
                     t_date = last.get('date')
                     if t_nw is not None and t_date is not None:
-                        if not net_worth_date or str(t_date) > str(net_worth_date):
+                        if not net_worth_date or _normalize_date(t_date) > _normalize_date(net_worth_date):
                             net_worth = str(t_nw)
                             net_worth_date = str(t_date)
     except Exception:
@@ -2357,6 +2441,50 @@ def _refresh_fundgz_estimate(db, fund_code):
         estimate_change=rt_data.get('gszzl'),
         estimate_time=rt_data.get('gztime')
     )
+
+
+def _refresh_single_fund_estimate(db, fund_code):
+    try:
+        payload = DataServiceClient(timeout=1.5).get_fund_estimates([fund_code])
+        ds_data = payload.get('data', {}) if isinstance(payload, dict) else {}
+        for item in ds_data.get('items', []) if isinstance(ds_data, dict) else []:
+            if isinstance(item, dict) and item.get('code') == fund_code and isinstance(item.get('data'), dict):
+                result = _upsert_data_service_estimate(db, fund_code, item['data'])
+                return _sync_latest_official_nav(db, fund_code, result)
+    except Exception as exc:
+        print(f"refresh single estimate: DataService unavailable for {fund_code}: {exc}")
+
+    try:
+        result = _refresh_fundgz_estimate(db, fund_code)
+        if result:
+            return _sync_latest_official_nav(db, fund_code, result)
+    except Exception as exc:
+        print(f"refresh single estimate: fundgz failed for {fund_code}: {exc}")
+
+    latest = _latest_nav_from_fund_trend(db, fund_code)
+    if latest:
+        return _sync_latest_official_nav(db, fund_code, {
+            'fund_code': fund_code,
+            'estimate_value': None,
+            'estimate_change': None,
+            'estimate_time': None,
+            'net_worth': _value_to_string(latest.get('nav')),
+            'net_worth_date': latest.get('date'),
+        })
+
+    # 兜底：尝试复用 FundEstimate 中已有的缓存数据（例如之前查看详情页时写入的）
+    existing = db.query(FundEstimate).filter(FundEstimate.fund_code == fund_code).first()
+    if existing:
+        print(f"refresh single estimate: reusing cached estimate for {fund_code}")
+        return {
+            'fund_code': fund_code,
+            'estimate_value': existing.estimate_value,
+            'estimate_change': existing.estimate_change,
+            'estimate_time': existing.estimate_time,
+            'net_worth': existing.net_worth,
+            'net_worth_date': existing.net_worth_date,
+        }
+    return None
 
 
 @app.route('/api/watchlist/refresh-estimates', methods=['GET', 'POST'])
@@ -2375,71 +2503,24 @@ def refresh_watchlist_estimates():
     fund_codes = [item.fund_code for item in watchlist]
     updated_count = 0
     results = []
-    data_service_success_count = 0
-    data_service_failed_count = 0
-    fallback_success_count = 0
-    fallback_failed_count = 0
-    fallback_codes = list(fund_codes)
+    failed_count = 0
 
-    try:
-        data_service_payload = get_data_service_client().get_fund_estimates(fund_codes)
-        ds_data = data_service_payload.get('data', {}) if isinstance(data_service_payload, dict) else {}
-
-        # New format: data.items (successes) + data.failed (failures)
-        ds_items = ds_data.get('items', []) if isinstance(ds_data, dict) else []
-        ds_failed = ds_data.get('failed', []) if isinstance(ds_data, dict) else []
-
-        successful_codes = set()
-
-        # Process successful items
-        for item in ds_items:
-            if not isinstance(item, dict):
-                continue
-            fund_code = item.get('code')
-            if fund_code not in fund_codes:
-                continue
-            if isinstance(item.get('data'), dict):
-                result = _upsert_data_service_estimate(db, fund_code, item['data'])
-                results.append(_sync_latest_official_nav(db, fund_code, result))
-                successful_codes.add(fund_code)
-                data_service_success_count += 1
-                updated_count += 1
-
-        # Track explicitly failed items from DataService
-        for item in ds_failed:
-            if not isinstance(item, dict):
-                continue
-            fund_code = item.get('code')
-            if fund_code and fund_code in fund_codes:
-                data_service_failed_count += 1
-
-        fallback_codes = [code for code in fund_codes if code not in successful_codes]
-    except DataServiceError as e:
-        data_service_failed_count = len(fund_codes)
-        fallback_codes = list(fund_codes)
-        print(f"DataService batch estimate unavailable, fallback to fundgz: {e}")
-    
-    for fund_code in fallback_codes:
+    for fund_code in fund_codes:
         try:
-            # 只获取实时估值数据（轻量级请求）
-            fallback_result = _refresh_fundgz_estimate(db, fund_code)
-            
-            if fallback_result:
-                fallback_result = _sync_latest_official_nav(db, fund_code, fallback_result)
+            result = _refresh_single_fund_estimate(db, fund_code)
+            if result:
                 updated_count += 1
-                fallback_success_count += 1
-                results.append(fallback_result)
+                results.append(result)
+            else:
+                failed_count += 1
         except Exception as e:
             # 单个基金失败不影响其他
             print(f"刷新 {fund_code} 估值失败: {e}")
-            continue
-    fallback_failed_count = max(0, len(fallback_codes) - fallback_success_count)
+            failed_count += 1
+
     print(
         "refresh_watchlist_estimates: "
-        f"data_service_success={data_service_success_count}, "
-        f"data_service_failed={data_service_failed_count}, "
-        f"fallback_success={fallback_success_count}, "
-        f"fallback_failed={fallback_failed_count}"
+        f"updated={updated_count}, failed={failed_count}, total={len(fund_codes)}"
     )
 
     try:
@@ -2452,10 +2533,7 @@ def refresh_watchlist_estimates():
         'message': f'Updated {updated_count} funds',
         'updated': updated_count,
         'total': len(fund_codes),
-        'data_service_success': data_service_success_count,
-        'data_service_failed': data_service_failed_count,
-        'fallback_success': fallback_success_count,
-        'fallback_failed': fallback_failed_count,
+        'failed': failed_count,
         'data': results
     })
 

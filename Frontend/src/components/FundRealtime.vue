@@ -4,6 +4,9 @@
       <button class="btn btn-primary add-fund-trigger" @click="openAddFundModal">
         + 添加基金
       </button>
+      <button class="btn btn-blue" @click="refreshAll" :disabled="refreshing || funds.length === 0">
+        {{ refreshing ? '刷新中...' : '刷新估值' }}
+      </button>
       <div class="sort-box">
         <select v-model="sortBy" class="select-sort">
           <option value="changeDesc">收益率从高到低</option>
@@ -583,8 +586,11 @@ export default {
     const getDateText = (value) => {
       if (!value) return ''
       const text = String(value)
-      const matched = text.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/)
-      return matched ? matched[0].replace(/\//g, '-') : ''
+      const matched = text.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+      if (matched) {
+        return `${matched[1]}-${String(matched[2]).padStart(2, '0')}-${String(matched[3]).padStart(2, '0')}`
+      }
+      return ''
     }
 
     const hasFreshEstimate = (fund) => {
@@ -744,6 +750,14 @@ export default {
       const effectiveNavDate = latestOfficialNav?.date || realtimeNavDate
       const realtimeEstimateDate = getDateText(realtime.estimate_time)
       const shouldUseEstimateChange = !!realtimeEstimateDate && !!effectiveNavDate && realtimeEstimateDate > effectiveNavDate
+      const estimatedNav = Number(realtime.estimate_value)
+      const baseOfficialNav = latestOfficialNav?.nav ?? Number(realtime.net_worth)
+      const estimateChangeFromNav = shouldUseEstimateChange
+        && Number.isFinite(estimatedNav)
+        && Number.isFinite(baseOfficialNav)
+        && baseOfficialNav > 0
+          ? ((estimatedNav - baseOfficialNav) / baseOfficialNav) * 100
+          : null
       const officialChange = latestOfficialNav && previousTrendNav?.nav
         ? ((latestOfficialNav.nav - previousTrendNav.nav) / previousTrendNav.nav) * 100
         : null
@@ -755,9 +769,11 @@ export default {
         gsz: realtime.estimate_value,
         gztime: realtime.estimate_time,
         jzrq: latestOfficialNav ? latestOfficialNav.date : realtime.net_worth_date,
-        gszzl: !shouldUseEstimateChange && latestOfficialNav && Number.isFinite(officialChange)
-          ? officialChange
-          : (Number.isFinite(changeNum) ? changeNum : 0),
+        gszzl: shouldUseEstimateChange
+          ? (Number.isFinite(estimateChangeFromNav) ? estimateChangeFromNav : (Number.isFinite(changeNum) ? changeNum : 0))
+          : (latestOfficialNav && Number.isFinite(officialChange)
+            ? officialChange
+            : (Number.isFinite(changeNum) ? changeNum : 0)),
         holdings: mapPortfolioHoldings(detail?.portfolio),
         netWorthTrend: trend,
         totalReturnTrend: Array.isArray(detail?.total_return_trend) ? detail.total_return_trend : []
@@ -1009,11 +1025,16 @@ export default {
     // 通过后端接口获取基金数据
     const fetchFundData = async (code) => {
       try {
-        const cachedRes = await fundAPI.getFundCompareData(code)
-        return mapFundDetailToRealtime(cachedRes?.data || {}, code)
+        const freshRes = await fundAPI.getFundCompareData(code, true)
+        return mapFundDetailToRealtime(freshRes?.data || {}, code)
       } catch (e) {
-        const res = await fundAPI.getFundDetail(code)
-        return mapFundDetailToRealtime(res?.data || {}, code)
+        try {
+          const res = await fundAPI.getFundDetail(code)
+          return mapFundDetailToRealtime(res?.data || {}, code)
+        } catch {
+          const cachedRes = await fundAPI.getFundCompareData(code)
+          return mapFundDetailToRealtime(cachedRes?.data || {}, code)
+        }
       }
     }
 

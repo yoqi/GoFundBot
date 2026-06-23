@@ -115,7 +115,7 @@ export class EastMoneyFundProvider implements FundProvider {
     const items = navTrend.map((item): FundNavPointDto => {
       const timestamp = toNullableNumber(item.x);
       return {
-        date: timestamp ? new Date(timestamp).toISOString().slice(0, 10) : '',
+        date: timestamp ? formatChinaDate(timestamp) : '',
         timestamp,
         nav: toNumberValue(item.y),
         accNav: timestamp == null ? null : accByTimestamp.get(timestamp) ?? null,
@@ -455,7 +455,7 @@ export class EastMoneyFundProvider implements FundProvider {
       const ts = Number(entry[0]);
       const pct = Number(entry[1]);
       items.push({
-        date: ts ? new Date(ts).toISOString().slice(0, 10) : '',
+        date: ts ? formatChinaDate(ts) : '',
         positionPercentage: Number.isFinite(pct) ? pct : null,
       });
     }
@@ -776,6 +776,15 @@ function emptyToNull(value: string | undefined): string | null {
 function compactTimestamp(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function formatChinaDate(timestamp: number): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(timestamp));
 }
 
 function filterNavHistory(data: FundNavHistoryDto, range: FundNavHistoryOptions): FundNavHistoryDto {

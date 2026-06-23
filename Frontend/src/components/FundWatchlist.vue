@@ -223,6 +223,17 @@ export default {
     const isRefreshingEstimates = ref(false)
     const ESTIMATE_REFRESH_INTERVAL = 3 * 60 * 1000  // 3分钟刷新一次估值
 
+    // 日期字符串规范化比较（处理 "2026-6-21" vs "2026-06-22" 这类零填充差异）
+    const _compareDateStr = (val) => {
+      if (!val) return ''
+      const s = String(val)
+      const m = s.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+      if (m) {
+        return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`
+      }
+      return s
+    }
+
     // 计算属性
     const totalCount = computed(() => watchlist.value.length)
     
@@ -266,35 +277,43 @@ export default {
     // 刷新估值数据（只更新估值，不重新加载整个列表）
     const refreshEstimates = async () => {
       if (isRefreshingEstimates.value || watchlist.value.length === 0) return
-      
+
       isRefreshingEstimates.value = true
       try {
         const response = await watchlistAPI.refreshEstimates()
+        // 先重新加载整个列表（后端 refresh-estimates 已提交最新估值到数据库）
+        await loadWatchlist()
+        // 再用 refresh-estimates 的直接返回值补充可能遗漏的字段
         if (response.data && response.data.data) {
-          // 更新本地数据中的估值信息
           const estimateMap = {}
           response.data.data.forEach(item => {
             estimateMap[item.fund_code] = item
           })
-          
+
           watchlist.value.forEach(fund => {
             const newEstimate = estimateMap[fund.fund_code]
             if (newEstimate) {
-              fund.estimate_value = newEstimate.estimate_value
-              fund.estimate_change = newEstimate.estimate_change
-              fund.estimate_time = newEstimate.estimate_time
-              // 净值只在日期更新时覆盖，防止刷新接口返回旧数据
-              if (newEstimate.net_worth_date && (!fund.net_worth_date || String(newEstimate.net_worth_date) >= String(fund.net_worth_date))) {
+              // 只在数据库返回缺失时用直接返回值补全
+              if (!fund.estimate_value && newEstimate.estimate_value) {
+                fund.estimate_value = newEstimate.estimate_value
+              }
+              if (!fund.estimate_change && newEstimate.estimate_change) {
+                fund.estimate_change = newEstimate.estimate_change
+              }
+              if (!fund.estimate_time && newEstimate.estimate_time) {
+                fund.estimate_time = newEstimate.estimate_time
+              }
+              if (!fund.net_worth && newEstimate.net_worth) {
+                fund.net_worth = newEstimate.net_worth
+                fund.net_worth_date = newEstimate.net_worth_date
+              } else if (newEstimate.net_worth_date && fund.net_worth_date && _compareDateStr(newEstimate.net_worth_date) > _compareDateStr(fund.net_worth_date)) {
                 fund.net_worth = newEstimate.net_worth
                 fund.net_worth_date = newEstimate.net_worth_date
               }
             }
           })
-
-          await loadWatchlist()
-          
-          lastEstimateUpdate.value = new Date().toLocaleTimeString()
         }
+        lastEstimateUpdate.value = new Date().toLocaleTimeString()
       } catch (error) {
         console.error('刷新估值失败:', error)
       } finally {

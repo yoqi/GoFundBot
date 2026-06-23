@@ -55,7 +55,7 @@ class FundDataCleaner:
     def parse_timestamp(self, timestamp: int) -> str:
         """将时间戳转换为日期字符串"""
         try:
-            return datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
+            return datetime.utcfromtimestamp(timestamp / 1000 + 8 * 60 * 60).strftime('%Y-%m-%d')
         except (ValueError, TypeError):
             return str(timestamp)
     

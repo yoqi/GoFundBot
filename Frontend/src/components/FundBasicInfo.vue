@@ -160,9 +160,15 @@ export default {
       if (isNaN(estimate) || estimate <= 0) return false
       if (!this.fundInfo.gztime || !this.fundInfo.jzrq) return false
       // 比较日期部分：估值日期 > 净值日期 → 盘中估值更新鲜
-      const estDate = String(this.fundInfo.gztime).substring(0, 10)
-      const navDate = String(this.fundInfo.jzrq).substring(0, 10)
-      return estDate > navDate
+      // 使用正则提取并规范化日期，避免 "2026-6-23" vs "2026-06-21" 零填充比较错误
+      const extractNorm = (v) => {
+        const s = String(v)
+        const m = s.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+        return m ? `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}` : ''
+      }
+      const estDate = extractNorm(this.fundInfo.gztime)
+      const navDate = extractNorm(this.fundInfo.jzrq)
+      return !!estDate && !!navDate && estDate > navDate
     },
     // 显示涨跌幅（盘中用估算涨跌，净值更新后显示实际涨跌）
     displayChange() {
@@ -240,7 +246,14 @@ export default {
           // 添加自选
           const fundName = this.fundInfo?.name || this.fundInfo?.fund_name || this.fundCode
           const fundType = this.fundInfo?.fund_type || ''
-          await watchlistAPI.addToWatchlist(this.fundCode, fundName, fundType)
+          await watchlistAPI.addToWatchlist(this.fundCode, fundName, fundType, null, {
+            name: fundName,
+            net_worth: this.fundInfo?.dwjz,
+            net_worth_date: this.fundInfo?.jzrq,
+            estimate_value: this.fundInfo?.gsz,
+            estimate_change: this.fundInfo?.gszzl,
+            estimate_time: this.fundInfo?.gztime
+          })
           this.isInWatchlist = true
           window.dispatchEvent(new CustomEvent('watchlist-updated', {
             detail: { fundCode: this.fundCode, action: 'add' }
@@ -272,6 +285,23 @@ export default {
         }
       }
 
+      const extractDate = (value) => {
+        const s = String(value || '')
+        const matched = s.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+        if (matched) {
+          return `${matched[1]}-${String(matched[2]).padStart(2, '0')}-${String(matched[3]).padStart(2, '0')}`
+        }
+        return ''
+      }
+      const estimateDate = extractDate(realtime.estimate_time)
+      const navDate = extractDate(realtime.net_worth_date)
+      const estimateNav = parseFloat(realtime.estimate_value)
+      const officialNav = parseFloat(realtime.net_worth)
+      let estimateChange = realtime.estimate_change
+      if (estimateDate && navDate && estimateDate > navDate && estimateNav > 0 && officialNav > 0) {
+        estimateChange = ((estimateNav - officialNav) / officialNav * 100)
+      }
+
       this.fundInfo = {
         ...data,
         ...data.basic_info,
@@ -290,7 +320,7 @@ export default {
         dwjz: realtime.net_worth,          // 单位净值
         jzrq: realtime.net_worth_date,     // 净值日期
         gsz: realtime.estimate_value,       // 估算净值
-        gszzl: realtime.estimate_change,    // 估算涨跌幅
+        gszzl: estimateChange,              // 估算涨跌幅
         gztime: realtime.estimate_time,     // 估值时间
         // 实际日涨跌幅（基于已公布净值计算）
         actualChange: actualChange

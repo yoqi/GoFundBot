@@ -92,12 +92,13 @@ export const watchlistAPI = {
   },
   
   // 添加基金到自选
-  addToWatchlist(fundCode, fundName, fundType = '', groupId = null) {
+  addToWatchlist(fundCode, fundName, fundType = '', groupId = null, estimate = null) {
     return api.post('/watchlist', {
       fund_code: fundCode,
       fund_name: fundName,
       fund_type: fundType,
-      group_id: groupId
+      group_id: groupId,
+      estimate
     })
   },
   
