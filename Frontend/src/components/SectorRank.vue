@@ -185,7 +185,7 @@ export default {
   props: {
     limit: {
       type: Number,
-      default: 500
+      default: 90
     },
     autoRefresh: {
       type: Boolean,
@@ -246,8 +246,10 @@ export default {
           return
         }
 
+        clearSectorData()
         error.value = response.data.error || '外部行情源暂不可用，暂无可展示的板块排行'
       } catch (e) {
+        clearSectorData()
         error.value = '外部行情源连接失败，请稍后重试'
         console.error('获取板块排行失败:', e)
       } finally {
@@ -262,6 +264,16 @@ export default {
       isStale.value = !!meta.is_stale
       isPartial.value = !!meta.is_partial
       dataSource.value = meta.source || ''
+      currentPage.value = 1
+    }
+
+    const clearSectorData = () => {
+      sectors.value = []
+      updateTime.value = ''
+      dataDate.value = ''
+      isStale.value = false
+      isPartial.value = false
+      dataSource.value = ''
       currentPage.value = 1
     }
 

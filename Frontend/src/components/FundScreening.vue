@@ -317,22 +317,6 @@
         <div class="results-title-row">
           <h3>筛选结果 <span class="result-count">(共 {{ totalCount }} 只)</span></h3>
         </div>
-        
-        <div class="sort-options">
-          <label>排序:</label>
-          <select v-model="sortBy" @change="search">
-            <option value="sharpe_ratio_1y">夏普比率(1年)</option>
-            <option value="return_1y">收益率(1年)</option>
-            <option value="calmar_ratio_1y">卡玛比率(1年)</option>
-            <option value="max_drawdown_1y">最大回撤(1年)</option>
-            <option value="volatility_1y">波动率(1年)</option>
-            <option value="fund_scale">基金规模</option>
-          </select>
-          <select v-model="sortOrder" @change="search">
-            <option value="desc">降序</option>
-            <option value="asc">升序</option>
-          </select>
-        </div>
       </div>
 
       <!-- 加载状态 -->
@@ -781,7 +765,7 @@ export default {
       columns: [
         { type: 'seq', width: 54, title: '序号', fixed: 'left' },
         { field: 'fund_code', title: '基金代码', width: 110, sortable: true, fixed: 'left' },
-        { field: 'fund_name', title: '基金名称', minWidth: 190, fixed: 'left', slots: { default: 'fundName' } },
+        { field: 'fund_name', title: '基金名称', minWidth: 190, sortable: true, fixed: 'left', slots: { default: 'fundName' } },
         { field: 'industry_tag_name', title: '板块', width: 110, sortable: true, slots: { default: 'industryTag' } },
         { field: 'fund_type', title: '类型', width: 130, sortable: true },
         { field: 'return_1m', title: '近1月', width: 100, sortable: true, slots: { default: 'percent' } },
@@ -1073,10 +1057,12 @@ export default {
       search()
     }
 
-    const handleGridSort = ({ field, order }) => {
-      if (!field || !order) return
+    const handleGridSort = (params = {}) => {
+      const field = params.field || params.property || params.column?.field
+      if (!field) return
+      const nextOrder = params.order || (sortBy.value === field && sortOrder.value === 'desc' ? 'asc' : 'desc')
       sortBy.value = field
-      sortOrder.value = order === 'asc' ? 'asc' : 'desc'
+      sortOrder.value = nextOrder === 'asc' ? 'asc' : 'desc'
       search(true)
     }
 
@@ -1902,26 +1888,6 @@ export default {
   font-size: 12px;
   color: #9ca3af;
   text-align: center;
-}
-
-.sort-options {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.sort-options label {
-  color: #666;
-  font-size: 0.9rem;
-}
-
-.sort-options select {
-  padding: 6px 10px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 13px;
-  background: white;
 }
 
 /* 表格 */

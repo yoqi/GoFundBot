@@ -389,24 +389,33 @@ export default {
       }
     })
 
+    const fetchOverview = async () => {
+      const response = await marketAPI.getOverview()
+      if (response.data.success) {
+        const data = response.data
+        if (data.market_index?.success) marketIndex.value = data.market_index.data
+        if (data.gold_realtime?.success) goldRealtime.value = data.gold_realtime.data
+        if (data.a_volume_7days?.success) aVolume.value = data.a_volume_7days.data.slice().reverse() // 按时间正序
+        updateTime.value = data.update_time
+      }
+    }
+
+    const fetchIntraday = async () => {
+      const intradayRes = await marketAPI.getIndicesIntraday()
+      if (intradayRes.data.success) {
+        indicesIntraday.value = intradayRes.data.data
+      }
+    }
+
     const fetchAll = async () => {
       loading.value = true
       try {
-        const response = await marketAPI.getOverview()
-        if (response.data.success) {
-          const data = response.data
-          if (data.market_index?.success) marketIndex.value = data.market_index.data
-          if (data.gold_realtime?.success) goldRealtime.value = data.gold_realtime.data
-          if (data.a_volume_7days?.success) aVolume.value = data.a_volume_7days.data.reverse() // 按时间正序
-          updateTime.value = data.update_time
-        }
-        
-        // 获取多指数分时数据
-        const intradayRes = await marketAPI.getIndicesIntraday()
-        if (intradayRes.data.success) {
-            indicesIntraday.value = intradayRes.data.data
-        }
-        
+        const [overviewResult, intradayResult] = await Promise.allSettled([
+          fetchOverview(),
+          fetchIntraday()
+        ])
+        if (overviewResult.status === 'rejected') console.error(overviewResult.reason)
+        if (intradayResult.status === 'rejected') console.error(intradayResult.reason)
       } catch (e) {
         console.error(e)
       } finally {

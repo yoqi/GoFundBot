@@ -369,7 +369,9 @@ class FundDataCleaner:
         net_worth = fundgz_nav
         net_worth_date = fundgz_date
         if trend_latest_nav is not None and trend_latest_date is not None:
-            if not fundgz_date or str(trend_latest_date) > str(fundgz_date):
+            norm_trend_date = self._normalize_date_for_compare(trend_latest_date)
+            norm_fundgz_date = self._normalize_date_for_compare(fundgz_date)
+            if not norm_fundgz_date or norm_trend_date >= norm_fundgz_date:
                 net_worth = trend_latest_nav
                 net_worth_date = trend_latest_date
 
@@ -413,6 +415,19 @@ class FundDataCleaner:
         }
         
         return cleaned_data
+
+    @staticmethod
+    def _normalize_date_for_compare(value: Any) -> str:
+        if not value:
+            return ''
+        matched = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', str(value))
+        if not matched:
+            return str(value)
+        return '{}-{:02d}-{:02d}'.format(
+            matched.group(1),
+            int(matched.group(2)),
+            int(matched.group(3)),
+        )
 
 # --- 基金 API 客户端 ---
 

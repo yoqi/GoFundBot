@@ -273,7 +273,7 @@ class FundMasterService:
             return []
 
         candidates = []
-        for fn_name in ("stock_board_industry_name_em", "stock_board_industry_summary_ths"):
+        for fn_name in ("stock_board_industry_summary_ths",):
             try:
                 fn = getattr(ak, fn_name, None)
                 if not fn:
@@ -287,9 +287,12 @@ class FundMasterService:
 
         for df in candidates:
             rows = []
-            for _, row in df.head(max(limit, 80)).iterrows():
+            for _, row in df.head(max(min(limit, 120), 80)).iterrows():
                 name = row.get("板块名称") or row.get("板块") or row.get("名称")
                 if not name:
+                    continue
+                code = str(row.get("板块代码") or row.get("代码") or row.get("鏉垮潡浠ｇ爜") or row.get("浠ｇ爜") or "")
+                if code and not code.startswith("BK"):
                     continue
                 change = row.get("涨跌幅")
                 if change is None:
@@ -300,6 +303,7 @@ class FundMasterService:
                 inflow_val = self._safe_float(inflow, 0.0)
                 rows.append({
                     "name": str(name),
+                    "code": code,
                     "change_pct": self._format_pct(change),
                     "main_inflow": f"{round(inflow_val, 2)}亿" if inflow_val else "0亿",
                     "main_inflow_pct": self._format_pct(inflow_pct),
@@ -549,10 +553,10 @@ class FundMasterService:
         return result
     
     # ==================== 行业板块排行 ====================
-    def get_sector_rank(self, limit: int = 500) -> dict:
+    def get_sector_rank(self, limit: int = 90) -> dict:
         """
         获取行业板块排行（按涨跌幅排序）
-        数据源：同花顺 (akshare)，失败时降级到文件缓存
+        数据源：同花顺 (akshare.stock_board_industry_summary_ths)
 
         Args:
             limit: 返回板块数量，默认500
@@ -560,18 +564,13 @@ class FundMasterService:
         Returns:
             dict: {'success': bool, 'data': list, 'update_time': str}
         """
+        limit = max(1, min(int(limit or 90), 120))
         cache_key = f'sector_rank_{limit}'
+        data_date = self._last_a_share_trading_date()
+
         cached = self._get_cache(cache_key)
         if cached:
             return cached
-        data_date = self._last_a_share_trading_date()
-        is_stale = not self._is_a_share_trading_time()
-
-        if is_stale:
-            file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=True)
-            if file_cached:
-                self._set_cache(cache_key, file_cached, 'sector_rank')
-                return file_cached
 
         # ── 同花顺 (akshare) —— 唯一数据源 ──
         akshare_rows = self._get_sector_rank_akshare(limit)
@@ -582,22 +581,13 @@ class FundMasterService:
                 "total_count": len(akshare_rows),
                 "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "data_date": data_date,
-                "is_stale": is_stale,
-                "source": "akshare"
+                "is_stale": False,
+                "source": "akshare.ths"
             }
             self._set_cache(cache_key, data, 'sector_rank')
             self._save_sector_rank_file_cache(data)
             return data
 
-        # ── 降级: 缓存 / 文件 / 占位 ──
-        stale = self._get_stale_cache(cache_key)
-        if stale and stale.get("data"):
-            stale = {**stale, "source": "stale_cache", "is_stale": True, "data_date": stale.get("data_date") or data_date}
-            return stale
-        file_cached = self._load_sector_rank_file_cache(limit, data_date, require_full=False)
-        if file_cached:
-            self._set_cache(cache_key, file_cached, 'sector_rank')
-            return file_cached
         return {"success": False, "error": "获取板块数据失败", "data": []}
 
     def _get_sector_rank_fallback(self, limit: int = 50) -> list:
@@ -1085,16 +1075,30 @@ class FundMasterService:
         if cached:
             return cached
             
-        sh_data = self._get_tencent_intraday("sh000001")
-        sz_data = self._get_tencent_intraday("sz399001")
-        hs300_data = self._get_tencent_intraday("sh000300")
+        targets = {
+            "sh": "sh000001",
+            "sz": "sz399001",
+            "hs300": "sh000300",
+        }
+        intraday = {key: [] for key in targets}
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(self._get_tencent_intraday, code): key
+                for key, code in targets.items()
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    intraday[key] = future.result(timeout=6)
+                except Exception as e:
+                    print(f"Error fetching intraday index {key}: {e}")
         
         data = {
             "success": True,
             "data": {
-                "sh": sh_data,
-                "sz": sz_data,
-                "hs300": hs300_data
+                "sh": intraday["sh"],
+                "sz": intraday["sz"],
+                "hs300": intraday["hs300"]
             },
             "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -1139,9 +1143,7 @@ class FundMasterService:
         tasks = {
             "market_index": self.get_market_index,
             "gold_realtime": self.get_gold_realtime,
-            "sector_rank": lambda: self._get_sector_rank_via_service(limit=500),
             "a_volume_7days": self.get_a_volume_7days,
-            "sse_30min": self.get_sse_30min,
         }
 
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -1151,16 +1153,14 @@ class FundMasterService:
                 try:
                     results[key] = future.result(timeout=30)
                 except Exception as e:
-                    logger.warning(f"[MarketOverview] 获取 {key} 失败: {e}")
+                    print(f"[MarketOverview] fetch {key} failed: {e}")
                     results[key] = {"success": False, "error": str(e), "data": []}
 
         return {
             "success": True,
             "market_index": results.get("market_index"),
             "gold_realtime": results.get("gold_realtime"),
-            "sector_rank": results.get("sector_rank"),
             "a_volume_7days": results.get("a_volume_7days"),
-            "sse_30min": results.get("sse_30min"),
             "update_time": update_time
         }
 

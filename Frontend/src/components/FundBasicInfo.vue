@@ -304,9 +304,21 @@ export default {
         return ''
       }
       const estimateDate = extractDate(realtime.estimate_time)
-      const navDate = extractDate(realtime.net_worth_date)
+      const trendLatest = Array.isArray(data.net_worth_trend) && data.net_worth_trend.length
+        ? data.net_worth_trend[data.net_worth_trend.length - 1]
+        : null
+      const trendLatestDate = extractDate(trendLatest?.date)
+      const realtimeNavDate = extractDate(realtime.net_worth_date)
+      const useTrendOfficial = trendLatest
+        && trendLatest.net_worth !== undefined
+        && trendLatest.net_worth !== null
+        && trendLatestDate
+        && (!realtimeNavDate || trendLatestDate >= realtimeNavDate)
+      const officialNavValue = useTrendOfficial ? trendLatest.net_worth : realtime.net_worth
+      const officialNavDate = useTrendOfficial ? trendLatest.date : realtime.net_worth_date
+      const navDate = extractDate(officialNavDate)
       const estimateNav = parseFloat(realtime.estimate_value)
-      const officialNav = parseFloat(realtime.net_worth)
+      const officialNav = parseFloat(officialNavValue)
       let estimateChange = realtime.estimate_change
       if (estimateDate && navDate && estimateDate > navDate && estimateNav > 0 && officialNav > 0) {
         estimateChange = ((estimateNav - officialNav) / officialNav * 100)
@@ -327,8 +339,8 @@ export default {
         syl_6y: data.performance?.['6_month_return'],
         syl_1n: data.performance?.['1_year_return'],
         // 映射实时估值数据
-        dwjz: realtime.net_worth,          // 单位净值
-        jzrq: realtime.net_worth_date,     // 净值日期
+        dwjz: officialNavValue,          // 单位净值
+        jzrq: officialNavDate,     // 净值日期
         gsz: realtime.estimate_value,       // 估算净值
         gszzl: estimateChange,              // 估算涨跌幅
         gztime: realtime.estimate_time,     // 估值时间

@@ -13,7 +13,7 @@ from data_service_routes import data_service_bp
 from services.data_service_client import DataServiceClient, DataServiceError, get_data_service_client
 from services.data_service_legacy_mapper import map_data_service_detail_to_legacy
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, asc, and_, or_, func
+from sqlalchemy import desc, asc, and_, or_, func, cast, Float
 from datetime import datetime, timedelta
 import json
 import math
@@ -2416,15 +2416,90 @@ def _latest_nav_from_fund_trend(db, fund_code):
     }
 
 
-def _sync_latest_official_nav(db, fund_code, result=None):
-    latest = None
+def _refresh_fund_detail_estimate_snapshot(db, fund_code, result=None):
+    """Refresh lightweight NAV/estimate fields from the fund detail source.
+
+    Opening the detail page writes pingzhongdata's latest net-worth trend into
+    FundTrend. The watchlist refresh should do the same small sync so users do
+    not need to open each fund before seeing the latest official NAV.
+    """
     try:
-        latest = _latest_nav_from_data_service(fund_code)
+        raw_data = fund_api._fetch_raw_data(fund_code)
+    except Exception as exc:
+        print(f"refresh detail snapshot: failed for {fund_code}: {exc}")
+        return result
+
+    if not raw_data:
+        return result
+
+    trend_rows = fund_api.cleaner.clean_array_data(
+        raw_data.get('Data_netWorthTrend'), 'net_worth'
+    )
+    if trend_rows:
+        trend_record = db.query(FundTrend).filter(FundTrend.fund_code == fund_code).first()
+        if trend_record:
+            trend_record.net_worth_trend_json = _json_dumps(trend_rows)
+            trend_record.updated_time = datetime.now()
+        else:
+            db.add(FundTrend(
+                fund_code=fund_code,
+                net_worth_trend_json=_json_dumps(trend_rows),
+                accumulated_net_worth_json=_json_dumps([]),
+                position_trend_json=_json_dumps([]),
+                total_return_trend_json=_json_dumps([]),
+                ranking_trend_json=_json_dumps([]),
+                ranking_percentage_json=_json_dumps([]),
+                scale_fluctuation_json=_json_dumps({}),
+            ))
+
+    latest_nav = trend_rows[-1] if trend_rows else {}
+    fundgz_nav = raw_data.get('dwjz')
+    fundgz_date = raw_data.get('jzrq')
+    net_worth = fundgz_nav
+    net_worth_date = fundgz_date
+    if latest_nav:
+        trend_nav = latest_nav.get('net_worth')
+        trend_date = latest_nav.get('date')
+        if trend_nav is not None and trend_date is not None:
+            if not fundgz_date or _normalize_date(trend_date) > _normalize_date(fundgz_date):
+                net_worth = trend_nav
+                net_worth_date = trend_date
+
+    result = _upsert_fund_estimate(
+        db,
+        fund_code,
+        name=raw_data.get('name') or raw_data.get('fS_name'),
+        net_worth=_value_to_string(net_worth),
+        net_worth_date=net_worth_date,
+        estimate_value=_value_to_string(raw_data.get('gsz')),
+        estimate_change=_value_to_string(raw_data.get('gszzl')),
+        estimate_time=raw_data.get('gztime'),
+    )
+
+    return _sync_latest_official_nav(db, fund_code, result)
+
+
+def _sync_latest_official_nav(db, fund_code, result=None):
+    candidates = []
+    try:
+        latest_ds = _latest_nav_from_data_service(fund_code)
+        if latest_ds:
+            latest_ds['source'] = 'data_service_nav'
+            candidates.append(latest_ds)
     except Exception as exc:
         print(f"sync official nav: DataService unavailable for {fund_code}: {exc}")
 
-    if not latest:
-        latest = _latest_nav_from_fund_trend(db, fund_code)
+    latest_trend = _latest_nav_from_fund_trend(db, fund_code)
+    if latest_trend:
+        latest_trend['source'] = 'fund_trend'
+        candidates.append(latest_trend)
+
+    latest = None
+    for item in candidates:
+        if not item.get('date'):
+            continue
+        if latest is None or _normalize_date(item.get('date')) > _normalize_date(latest.get('date')):
+            latest = item
     if not latest:
         return result
 
@@ -2505,15 +2580,20 @@ def _refresh_fundgz_estimate(db, fund_code):
 
 
 def _refresh_single_fund_estimate(db, fund_code):
+    result = None
     try:
         payload = DataServiceClient(timeout=1.5).get_fund_estimates([fund_code])
         ds_data = payload.get('data', {}) if isinstance(payload, dict) else {}
         for item in ds_data.get('items', []) if isinstance(ds_data, dict) else []:
             if isinstance(item, dict) and item.get('code') == fund_code and isinstance(item.get('data'), dict):
                 result = _upsert_data_service_estimate(db, fund_code, item['data'])
-                return _sync_latest_official_nav(db, fund_code, result)
+                break
     except Exception as exc:
         print(f"refresh single estimate: DataService unavailable for {fund_code}: {exc}")
+
+    detail_result = _refresh_fund_detail_estimate_snapshot(db, fund_code, result)
+    if detail_result:
+        return detail_result
 
     try:
         result = _refresh_fundgz_estimate(db, fund_code)
@@ -5076,6 +5156,8 @@ def query_screening_funds():
     sort_map = {
         'sharpe_ratio_1y': FundRiskMetrics.sharpe_ratio_1y,
         'sharpe_ratio_3y': FundRiskMetrics.sharpe_ratio_3y,
+        'return_1m': cast(func.json_extract(FundBasicInfo.performance_json, '$.1_month_return'), Float),
+        'return_3m': cast(func.json_extract(FundBasicInfo.performance_json, '$.3_month_return'), Float),
         'return_1y': FundBasicInfo.return_1y,
         'volatility_1y': FundRiskMetrics.volatility_1y,
         'max_drawdown_1y': FundRiskMetrics.max_drawdown_1y,
@@ -5085,6 +5167,7 @@ def query_screening_funds():
         'fund_code': FundBasicInfo.fund_code,
         'fund_name': FundBasicInfo.fund_name,
         'fund_type': FundBasicInfo.fund_type,
+        'industry_tag_name': FundIndustryTag.industry_tag,
         'updated_time': FundBasicInfo.updated_time,
     }
     

@@ -78,57 +78,16 @@ def get_flash_news():
 @fund_master_bp.route('/sectors', methods=['GET'])
 def get_sector_rank():
     """
-    获取行业板块排行 – DataService first, legacy fallback
+    获取行业板块排行 – TongHuaShun first
 
-    GET /api/market/sectors?limit=500
+    GET /api/market/sectors?limit=90
 
-    新数据流：路由 → DataServiceClient → DataService → EastMoneyMarketProvider
-    失败时自动降级到旧 MarketDataService → akshare → 文件缓存。
+    数据流：路由 → FundMasterService → akshare.stock_board_industry_summary_ths。
+    东财行业板块源长期不稳定，这里不再作为主链路。
     """
-    limit = request.args.get('limit', 500, type=int)
+    limit = request.args.get('limit', 90, type=int)
+    limit = max(1, min(int(limit or 90), 120))
 
-    # 1) Try DataService
-    try:
-        ds_payload = get_data_service_client().get_market_sectors()
-        ds_data = ds_payload.get('data', {}) if isinstance(ds_payload, dict) else {}
-        ds_items = ds_data.get('items', []) if isinstance(ds_data, dict) else []
-
-        if ds_items:
-            # Map to legacy format expected by Frontend
-            sectors = []
-            for item in ds_items:
-                if not isinstance(item, dict):
-                    continue
-                change_pct = item.get('changePercent')
-                main_inflow = item.get('mainNetInflow')
-                sectors.append({
-                    'name': item.get('name', ''),
-                    'code': item.get('code', ''),
-                    'change_pct': _fmt_pct(change_pct),
-                    'main_inflow': _fmt_amount_yi(main_inflow),
-                    'raw_change': _safe_float(change_pct),
-                    'raw_main_inflow': _safe_float(main_inflow),
-                })
-            if _sector_moves_look_one_sided(sectors):
-                print("market sectors: DataService result looks one-sided, fallback to legacy")
-                raise DataServiceError(
-                    message="DataService sector distribution failed sanity check",
-                    code="DATA_SERVICE_SUSPECT_SECTOR_DATA",
-                    status_code=502,
-                )
-            meta = ds_payload.get('meta', {}) if isinstance(ds_payload.get('meta'), dict) else {}
-            print(f"market sectors: DataService success, {len(sectors)} sectors")
-            return jsonify({
-                'success': True,
-                'data': sectors,
-                'total_count': len(sectors),
-                'update_time': meta.get('updatedAt', ''),
-                'source': meta.get('provider') or 'data_service',
-            })
-    except DataServiceError as e:
-        print(f"market sectors: DataService unavailable, fallback to legacy: {e}")
-
-    # 2) Fallback to FundMasterService（内置熔断器 + akshare → 文件缓存降级链）
     service = get_fund_master_service()
     return jsonify(service.get_sector_rank(limit=limit))
 
