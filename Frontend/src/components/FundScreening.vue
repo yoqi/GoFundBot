@@ -27,6 +27,35 @@
       </div>
     </div>
 
+    <!-- 自定义确认弹窗（替换浏览器 confirm） -->
+    <div v-if="showIndustryDictDialog" class="modal-mask" style="z-index: 1100;" @click.self="resolveIndustryDict(false)">
+      <div class="confirm-dialog">
+        <div class="dialog-head">
+          <div>
+            <h3>刷新基金所属板块</h3>
+            <p>请选择是否重新构建股票行业字典</p>
+          </div>
+          <button class="dialog-close" @click="resolveIndustryDict(false)">×</button>
+        </div>
+        <div class="confirm-body">
+          <div class="confirm-option" @click="resolveIndustryDict(true)">
+            <span class="confirm-option-icon">🔄</span>
+            <div>
+              <strong>确定，重新构建字典</strong>
+              <em>先刷新股票行业字典，再重新分配基金所属板块</em>
+            </div>
+          </div>
+          <div class="confirm-option" @click="resolveIndustryDict(false)">
+            <span class="confirm-option-icon">📋</span>
+            <div>
+              <strong>取消，复用现有字典</strong>
+              <em>复用现有字典，只重新分配基金所属板块</em>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="showUpdateDialog" class="modal-mask" @click.self="closeUpdateDialog">
       <div class="update-dialog">
         <div class="dialog-head">
@@ -289,72 +318,6 @@
           <h3>筛选结果 <span class="result-count">(共 {{ totalCount }} 只)</span></h3>
         </div>
         
-        <!-- 类型快速筛选 - 多级菜单 -->
-        <div class="quick-type-filter">
-          <span class="filter-label-inline">类型筛选:</span>
-          <div class="quick-type-menu">
-            <!-- 全部按钮 -->
-            <span 
-              class="quick-tag"
-              :class="{ active: quickTypeFilter === '' }"
-              @click="setQuickTypeFilter('')"
-            >
-              全部
-            </span>
-            
-            <!-- 多级分类下拉 -->
-            <div 
-              v-for="category in quickTypeCategories" 
-              :key="category.name"
-              class="quick-type-dropdown"
-              @click.stop
-            >
-              <span 
-                class="quick-tag dropdown-trigger"
-                :class="{ 
-                  active: isCategoryTypeActive(category),
-                  'has-active': hasCategoryActiveType(category)
-                }"
-                @click="toggleQuickDropdown(category.name)"
-              >
-                {{ category.icon }} {{ category.name }}
-                <span class="dropdown-arrow">▼</span>
-              </span>
-              
-              <!-- 下拉菜单 -->
-              <div 
-                class="dropdown-menu"
-                v-show="activeQuickDropdown === category.name"
-              >
-                <div
-                  v-for="item in getFilteredCategoryTypes(category)"
-                  :key="item.value"
-                  class="dropdown-item"
-                  :class="{ active: quickTypeFilter === item.value, unavailable: !item.available }"
-                  @click="item.available && setQuickTypeFilter(item.value)"
-                >
-                  {{ item.label }}
-                  <span v-if="!item.available" class="unavailable-hint">暂无</span>
-                </div>
-                <div v-if="getFilteredCategoryTypes(category).length === 0" class="dropdown-empty">
-                  暂无此类型基金
-                </div>
-              </div>
-            </div>
-            
-            <!-- 未分类的类型（如果有） -->
-            <span 
-              v-for="type in uncategorizedTypes" 
-              :key="type"
-              class="quick-tag"
-              :class="{ active: quickTypeFilter === type }"
-              @click="setQuickTypeFilter(type)"
-            >
-              {{ getShortTypeName(type) }}
-            </span>
-          </div>
-        </div>
-        
         <div class="sort-options">
           <label>排序:</label>
           <select v-model="sortBy" @change="search">
@@ -385,6 +348,7 @@
           v-bind="gridOptions"
           :data="results"
           :loading="loading"
+          :sort-config="sortConfig"
           @sort-change="handleGridSort"
           @cell-click="handleGridCellClick"
         >
@@ -421,9 +385,9 @@
       </div>
 
       <!-- 分页 -->
-      <div class="pagination" v-if="totalPages > 1">
-        <button 
-          class="page-btn" 
+      <div class="pagination">
+        <button
+          class="page-btn"
           :disabled="currentPage === 1"
           @click="changePage(currentPage - 1)"
         >
@@ -432,8 +396,8 @@
         <span class="page-info">
           第 {{ currentPage }} / {{ totalPages }} 页
         </span>
-        <button 
-          class="page-btn" 
+        <button
+          class="page-btn"
           :disabled="currentPage === totalPages"
           @click="changePage(currentPage + 1)"
         >
@@ -500,6 +464,23 @@ export default {
       industry_performance: true
     })
     const hasSelectedUpdateTask = computed(() => Object.values(updateTasks).some(Boolean))
+
+    // 自定义确认弹窗（替换浏览器 confirm）
+    const showIndustryDictDialog = ref(false)
+    let resolveIndustryDictPromise = null
+    const resolveIndustryDict = (value) => {
+      showIndustryDictDialog.value = false
+      if (resolveIndustryDictPromise) {
+        resolveIndustryDictPromise(value)
+        resolveIndustryDictPromise = null
+      }
+    }
+    const askIndustryDictionary = () => {
+      return new Promise((resolve) => {
+        resolveIndustryDictPromise = resolve
+        showIndustryDictDialog.value = true
+      })
+    }
     
     // 高级筛选 — 直观的数值范围
     const showAdvanced = ref(false)
@@ -782,13 +763,9 @@ export default {
       border: true,
       stripe: true,
       showOverflow: true,
-      height: 560,
+      height: 1000,
       rowConfig: {
         isHover: true
-      },
-      sortConfig: {
-        remote: true,
-        trigger: 'cell'
       },
       toolbarConfig: {
         export: true,
@@ -820,6 +797,12 @@ export default {
       ]
     })
     
+    // 排序配置（plain reactive，不用 computed，避免与 grid 内部排序状态冲突）
+    const sortConfig = reactive({
+      remote: true,
+      trigger: 'default'
+    })
+
     // 进度百分比
     const progressPercent = computed(() => {
       const status = updateStatus.value
@@ -869,6 +852,10 @@ export default {
         alert('请至少选择一个更新任务')
         return
       }
+      let buildIndustryDictionary = false
+      if (updateTasks.industry) {
+        buildIndustryDictionary = await askIndustryDictionary()
+      }
       try {
         showUpdateDialog.value = false
         updateStatus.value = {
@@ -886,6 +873,7 @@ export default {
           mode: updateTasks.risk ? updateMode.value : 'sync_only',
           precise_limit: updateTasks.risk ? (preciseLimit.value || 500) : null,
           industry_limit: industryLimit.value || null,
+          build_industry_dictionary: buildIndustryDictionary,
           tasks: {
             ...updateTasks
           }
@@ -1079,6 +1067,12 @@ export default {
       search()
     }
 
+    // 每页条数变更
+    const onPageSizeChange = () => {
+      currentPage.value = 1
+      search()
+    }
+
     const handleGridSort = ({ field, order }) => {
       if (!field || !order) return
       sortBy.value = field
@@ -1121,10 +1115,14 @@ export default {
     // 格式化函数
     const formatPercent = (value, isNegative = false) => {
       if (value === null || value === undefined) return '--'
-      const prefix = isNegative ? '-' : (value > 0 ? '+' : '')
-      return `${prefix}${Math.abs(value).toFixed(2)}%`
+      const num = Number(value)
+      if (!Number.isFinite(num)) return '--'
+      // isNegative: 强制显示负号（用于最大回撤等以正数存储的指标）
+      if (isNegative) return `-${num.toFixed(2)}%`
+      const prefix = num > 0 ? '+' : ''
+      return `${prefix}${num.toFixed(2)}%`
     }
-    
+
     const formatNumber = (value) => {
       if (value === null || value === undefined) return '--'
       return value.toFixed(2)
@@ -1209,10 +1207,14 @@ export default {
       showUpdateDialog,
       updateTasks,
       hasSelectedUpdateTask,
+      showIndustryDictDialog,
+      resolveIndustryDict,
+      askIndustryDictionary,
       filters,
       industryTags,
       screeningGridRef,
       gridOptions,
+      sortConfig,
       fundTypeCategories,
       sortBy,
       sortOrder,
@@ -1258,6 +1260,7 @@ export default {
       resetFilters,
       search,
       changePage,
+      onPageSizeChange,
       handleGridSort,
       handleGridCellClick,
       viewFundDetail,
@@ -1677,6 +1680,58 @@ export default {
   gap: 10px;
   padding: 14px 22px 20px;
   border-top: 1px solid #eef2f7;
+}
+
+/* 自定义确认弹窗 */
+.confirm-dialog {
+  width: min(480px, 100%);
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+  overflow: hidden;
+}
+
+.confirm-body {
+  padding: 16px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.confirm-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.confirm-option:hover {
+  border-color: #1677ff;
+  background: #f0f5ff;
+}
+
+.confirm-option-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.confirm-option strong {
+  display: block;
+  font-size: 14px;
+  color: #111827;
+}
+
+.confirm-option em {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 /* 结果区域 */

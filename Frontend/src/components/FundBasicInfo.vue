@@ -184,13 +184,23 @@ export default {
     industryTagTitle() {
       const tag = this.fundIndustryTag
       if (!tag) return ''
-      if (tag.basis === 'mixed') {
-        return '按基金重仓股分类：没有任何行业达到 3 只重仓股，归为混合型'
+      const basisMap = {
+        fund_type: '按基金类型识别',
+        fund_name_topic: '按基金名称主题识别',
+        broad_index_name: '按宽基指数名称识别',
+        index_topic: '按指数或ETF主题识别',
+        holding_count: '按重仓股行业数量识别',
+        holding_weight: '按重仓股行业权重识别',
+        market_region: '按投资市场识别',
+        mixed: '未识别到明确行业或市场主题'
       }
-      const basis = tag.basis === 'ratio' && tag.ratio > 0
-        ? `重仓占比 ${tag.ratio}%`
+      if (tag.basis === 'mixed') {
+        return basisMap.mixed
+      }
+      const evidence = tag.ratio > 0
+        ? `重仓占比 ${tag.ratio}% / 重仓股 ${tag.count || 0} 只`
         : `重仓股 ${tag.count || 0} 只`
-      return `按基金重仓股分类：${tag.name}（${basis}）`
+      return `${basisMap[tag.basis] || '按基金信息识别'}：${tag.name}（${evidence}）`
     }
   },
   watch: {

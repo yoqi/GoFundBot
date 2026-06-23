@@ -7,7 +7,7 @@
       </div>
       <div class="header-actions">
         <span v-if="updatedAt" class="updated-time">更新 {{ formatDateTime(updatedAt) }}</span>
-        <button class="refresh-btn" :disabled="loading" @click="loadDashboard">
+        <button class="refresh-btn" :disabled="loading" @click="refreshDashboard">
           {{ loading ? '刷新中...' : '刷新' }}
         </button>
       </div>
@@ -226,6 +226,21 @@
       </section>
 
       <section v-show="activeTab === 'sectors'" class="tab-section">
+        <div v-if="industryTaskStatus.running && industryTaskStatus.message" class="state-card compact">
+          {{ industryTaskStatus.message }}
+          <span v-if="industryTaskStatus.total">
+            {{ industryTaskStatus.progress || 0 }}/{{ industryTaskStatus.total }}
+          </span>
+        </div>
+
+        <!-- Toast 通知 -->
+        <transition name="toast-fade">
+          <div v-if="showToast" class="sector-toast">
+            <span class="toast-icon">✅</span>
+            <span>{{ toastMessage }}</span>
+            <button class="toast-close" @click="showToast = false">×</button>
+          </div>
+        </transition>
         <div class="metric-grid">
           <div class="metric-card">
             <span class="metric-label">行业标签</span>
@@ -312,7 +327,7 @@
 </template>
 
 <script>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { researchAPI } from '../services/api'
 
 export default {
@@ -324,6 +339,20 @@ export default {
     const activeTab = ref('market')
     const dashboard = ref({})
     const updatedAt = ref('')
+    const industryTaskStatus = ref({})
+    let industryPollTimer = null
+    const showToast = ref(false)
+    const toastMessage = ref('')
+    let toastTimer = null
+
+    const showToastNotification = (message, duration = 4000) => {
+      toastMessage.value = message
+      showToast.value = true
+      if (toastTimer) clearTimeout(toastTimer)
+      toastTimer = setTimeout(() => {
+        showToast.value = false
+      }, duration)
+    }
 
     const tabs = [
       { key: 'market', label: '基金市场统计' },
@@ -338,6 +367,7 @@ export default {
       try {
         const res = await researchAPI.getDashboard({ limit: 5, etf_limit: 80 })
         dashboard.value = res.data || {}
+        industryTaskStatus.value = dashboard.value.industry_performance_task || dashboard.value.industry_performance?.task_status || {}
         if (!dashboard.value.industry_performance || !(dashboard.value.industry_performance.items || []).length) {
           try {
             const industryRes = await researchAPI.getIndustryPerformance()
@@ -345,6 +375,7 @@ export default {
               ...dashboard.value,
               industry_performance: industryRes.data || {}
             }
+            industryTaskStatus.value = industryRes.data?.task_status || industryTaskStatus.value
           } catch (industryErr) {
             console.warn('行业表现加载失败:', industryErr)
           }
@@ -352,6 +383,53 @@ export default {
         updatedAt.value = dashboard.value.updated_at || ''
       } catch (err) {
         error.value = err?.response?.data?.error || err?.message || '投研数据加载失败'
+      } finally {
+        loading.value = false
+      }
+    }
+
+    const pollIndustryPerformance = () => {
+      if (industryPollTimer) return
+      industryPollTimer = setInterval(async () => {
+        try {
+          const res = await researchAPI.getIndustryPerformance()
+          dashboard.value = {
+            ...dashboard.value,
+            industry_performance: res.data || {}
+          }
+          industryTaskStatus.value = res.data?.task_status || {}
+          if (!industryTaskStatus.value.running) {
+            clearInterval(industryPollTimer)
+            industryPollTimer = null
+            await loadDashboard()
+            // 弹窗提示完成
+            const itemCount = res.data?.items?.length || res.data?.summary?.total || 0
+            showToastNotification(`板块行情汇总完成，共 ${itemCount} 个板块`)
+          }
+        } catch (err) {
+          console.warn('板块行情后台刷新状态获取失败:', err)
+        }
+      }, 3000)
+    }
+
+    const refreshDashboard = async () => {
+      if (activeTab.value !== 'sectors') {
+        await loadDashboard()
+        return
+      }
+
+      loading.value = true
+      error.value = ''
+      try {
+        const res = await researchAPI.rebuildIndustryPerformance()
+        industryTaskStatus.value = res.data?.task_status || { running: true, message: '后台汇总板块行情...' }
+        dashboard.value = {
+          ...dashboard.value,
+          industry_performance: res.data?.data || dashboard.value.industry_performance || {}
+        }
+        pollIndustryPerformance()
+      } catch (err) {
+        error.value = err?.response?.data?.error || err?.message || '板块行情刷新启动失败'
       } finally {
         loading.value = false
       }
@@ -413,6 +491,9 @@ export default {
     }
 
     onMounted(loadDashboard)
+    onUnmounted(() => {
+      if (industryPollTimer) clearInterval(industryPollTimer)
+    })
 
     return {
       loading,
@@ -431,7 +512,12 @@ export default {
       industryItems,
       industryTop3m,
       industryTop1y,
+      industryTaskStatus,
+      showToast,
+      toastMessage,
+      showToastNotification,
       loadDashboard,
+      refreshDashboard,
       formatPercent,
       formatNumber,
       formatAmountYi,
@@ -844,6 +930,65 @@ export default {
   .research-header {
     flex-direction: column;
   }
+}
+
+/* Toast 通知 */
+.sector-toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(15, 23, 42, 0.16);
+  font-size: 14px;
+  color: #111827;
+  white-space: nowrap;
+}
+
+.toast-icon {
+  font-size: 16px;
+}
+
+.toast-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: #f3f4f6;
+  color: #6b7280;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.toast-close:hover {
+  background: #e5e7eb;
+}
+
+.toast-fade-enter-active,
+.toast-fade-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-fade-enter-from {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-12px);
+}
+
+.toast-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-12px);
 }
 
 @media (max-width: 720px) {

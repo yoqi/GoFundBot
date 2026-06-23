@@ -323,6 +323,10 @@ export const researchAPI = {
     return getWithLocalFallback('/research/industry-performance')
   },
 
+  rebuildIndustryPerformance() {
+    return api.post('/research/rebuild-industry-performance')
+  },
+
   getSectorSummary(limit = 50) {
     return getWithLocalFallback('/research/sector-summary', { params: { limit } })
   }
