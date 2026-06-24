@@ -110,10 +110,6 @@
             <input v-model.number="updateLimit" type="number" min="1" placeholder="留空为全部" />
           </label>
           <label>
-            <span>风险指标上限</span>
-            <input v-model.number="preciseLimit" type="number" min="1" />
-          </label>
-          <label>
             <span>行业刷新上限</span>
             <input v-model.number="industryLimit" type="number" min="1" placeholder="留空为全部" />
           </label>
@@ -437,7 +433,6 @@ export default {
     const selectedFundTypes = ref([])
     const updateLimit = ref(null)
     const updateMode = ref('sync_nav')
-    const preciseLimit = ref(500)
     const industryLimit = ref(null)
     const showUpdateDialog = ref(false)
     const updateTasks = reactive({
@@ -855,7 +850,6 @@ export default {
           fund_types: selectedFundTypes.value,
           limit: updateLimit.value || null,
           mode: updateTasks.risk ? updateMode.value : 'sync_only',
-          precise_limit: updateTasks.risk ? (preciseLimit.value || 500) : null,
           industry_limit: industryLimit.value || null,
           build_industry_dictionary: buildIndustryDictionary,
           tasks: {
@@ -1188,7 +1182,6 @@ export default {
       selectedFundTypes,
       updateLimit,
       updateMode,
-      preciseLimit,
       industryLimit,
       showUpdateDialog,
       updateTasks,

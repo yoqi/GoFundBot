@@ -3330,41 +3330,49 @@ def update_single_fund_risk_metrics(fund_code, db):
         return False
 
 
-def _select_nav_candidates(db, nav_limit):
-    rows = db.query(FundBasicInfo, FundScreeningRank).outerjoin(
-        FundScreeningRank, FundBasicInfo.fund_code == FundScreeningRank.fund_code
+def _select_nav_candidates(db):
+    """选择需要更新风险指标的基金：缺失风险数据或数据过期（超过7天）。"""
+    cutoff_date = datetime.now() - timedelta(days=7)
+
+    basic_rows = db.query(
+        FundBasicInfo.fund_code, FundBasicInfo.fund_name, FundBasicInfo.fund_type
     ).all()
+
+    risk_rows = db.query(
+        FundRiskMetrics.fund_code, FundRiskMetrics.sharpe_ratio_1y, FundRiskMetrics.updated_time
+    ).all()
+    risk_map = {r.fund_code: (r.sharpe_ratio_1y, r.updated_time) for r in risk_rows}
+
     candidates = []
-    for basic, rank in rows:
-        if not basic:
-            continue
-        rank_1y = rank.rank_pct_1y if rank else None
-        pass_4433 = bool(rank and rank.pass_4433 == 1)
-        if pass_4433 or (rank_1y is not None and rank_1y <= 30):
+    for basic in basic_rows:
+        code = basic.fund_code
+        if code not in risk_map:
+            # 无风险指标记录
             candidates.append({
-                'code': basic.fund_code,
+                'code': code,
                 'name': basic.fund_name,
                 'type': basic.fund_type or '',
-                'rank_1y': rank_1y if rank_1y is not None else 9999,
-                'pass_4433': pass_4433,
             })
+        else:
+            sharpe, updated = risk_map[code]
+            if sharpe is None:
+                # 有记录但缺失关键指标（夏普为空）
+                candidates.append({
+                    'code': code,
+                    'name': basic.fund_name,
+                    'type': basic.fund_type or '',
+                })
+            elif updated is None or updated < cutoff_date:
+                # 数据过期（超过7天未更新）
+                candidates.append({
+                    'code': code,
+                    'name': basic.fund_name,
+                    'type': basic.fund_type or '',
+                })
 
-    candidates.sort(key=lambda item: (0 if item['pass_4433'] else 1, item['rank_1y'], item['code']))
-    if nav_limit is None or len(candidates) <= nav_limit:
-        return candidates
-
-    by_type = {}
-    for item in candidates:
-        by_type.setdefault(item['type'], []).append(item)
-
-    selected = []
-    per_type = max(1, math.ceil(nav_limit / max(len(by_type), 1)))
-    for items in by_type.values():
-        selected.extend(items[:per_type])
-    if len(selected) < nav_limit:
-        selected_codes = {item['code'] for item in selected}
-        selected.extend(item for item in candidates if item['code'] not in selected_codes)
-    return selected[:nav_limit]
+    candidates.sort(key=lambda item: item['code'])
+    print(f"[筛查更新] 风险指标候选: {len(candidates)}只 (缺风险或过期>7天)", flush=True)
+    return candidates
 
 
 def _fund_codes_needing_industry_refresh(db, candidate_codes=None, force=False):
@@ -4235,7 +4243,6 @@ def batch_update_fund_data(
     fund_types=None,
     limit=None,
     mode='sync_nav',
-    precise_limit=500,
     task_id=None,
     industry_limit=None,
     tasks=None,
@@ -4263,7 +4270,6 @@ def batch_update_fund_data(
                     'fund_types': fund_types or [],
                     'limit': limit,
                     'mode': mode,
-                    'nav_limit': precise_limit,
                     'industry_limit': industry_limit,
                     'build_industry_dictionary': build_industry_dictionary,
                     'tasks': tasks,
@@ -4276,12 +4282,6 @@ def batch_update_fund_data(
             mode = 'sync_only'
         else:
             mode = 'sync_nav'
-        if precise_limit is not None:
-            try:
-                precise_limit = max(1, int(precise_limit))
-            except (TypeError, ValueError):
-                precise_limit = 500
-
         screening_stop_flag = False
         screening_update_status.update({
             'running': True,
@@ -4390,7 +4390,7 @@ def batch_update_fund_data(
             print(f"[筛查更新] 同类排名计算完成", flush=True)
 
         if not screening_stop_flag and calculate_risk_task:
-            candidates = _select_nav_candidates(db, precise_limit)
+            candidates = _select_nav_candidates(db)
             nav_success = 0
             nav_fail = 0
             _set_screening_progress(
@@ -4517,23 +4517,29 @@ def batch_fill_risk_metrics(db=None, task_id=None):
         db = own_db
 
     try:
-        # 查找所有有基本信息但无风险指标的基金（不限净值条数，后续会先同步净值再计算）
+        # 查找所有有基本信息但无风险指标或风险数据过期(>7天)的基金
+        cutoff_date = datetime.now() - timedelta(days=7)
         all_basic_codes = set()
         for row in db.query(FundBasicInfo.fund_code).all():
             all_basic_codes.add(row[0])
 
         risk_codes = set()
-        for row in db.query(FundRiskMetrics.fund_code).filter(
-            FundRiskMetrics.sharpe_ratio_1y.isnot(None)
-        ).all():
-            risk_codes.add(row[0])
+        stale_risk_codes = set()
+        for row in db.query(FundRiskMetrics.fund_code, FundRiskMetrics.sharpe_ratio_1y, FundRiskMetrics.updated_time).all():
+            if row.sharpe_ratio_1y is not None:
+                risk_codes.add(row.fund_code)
+                # 检查是否过期（超过7天未更新）
+                if row.updated_time is None or row.updated_time < cutoff_date:
+                    stale_risk_codes.add(row.fund_code)
 
         missing_risk_codes = all_basic_codes - risk_codes
+        # 缺失 + 过期
+        need_risk_update_codes = missing_risk_codes | stale_risk_codes
         missing_industry_codes = set(_fund_codes_needing_industry_refresh(db, all_basic_codes, force=False))
-        missing_codes = sorted(missing_risk_codes | missing_industry_codes)
+        missing_codes = sorted(need_risk_update_codes | missing_industry_codes)
         industry_tag_count = db.query(FundIndustryTag.fund_code).count()
 
-        print(f"[补充风险] 待处理: {len(missing_codes)}只 (缺风险:{len(missing_risk_codes)}, 缺行业:{len(missing_industry_codes)}, 总计:{len(all_basic_codes)}, 有风险:{len(risk_codes)}, 行业标签:{industry_tag_count})", flush=True)
+        print(f"[补充风险] 待处理: {len(missing_codes)}只 (缺风险:{len(missing_risk_codes)}, 过期风险:{len(stale_risk_codes)}, 缺行业:{len(missing_industry_codes)}, 总计:{len(all_basic_codes)}, 有风险:{len(risk_codes)}, 行业标签:{industry_tag_count})", flush=True)
 
         if not missing_codes:
             print("[补充风险] 无需补充，所有基金已有风险指标", flush=True)
@@ -4577,7 +4583,7 @@ def batch_fill_risk_metrics(db=None, task_id=None):
                 'fail_count': fail,
             })
 
-            if code in missing_risk_codes:
+            if code in missing_risk_codes or code in stale_risk_codes:
                 ok = update_single_fund_risk_metrics(code, db)
             else:
                 ok = _refresh_fund_industry_tag(db, code, fetch_holdings_if_missing=True) is not None
@@ -4743,13 +4749,12 @@ def start_screening_update():
     fund_types = data.get('fund_types') or []
     limit = data.get('limit')
     mode = data.get('mode') or 'sync_nav'
-    precise_limit = data.get('precise_limit', 500)
     industry_limit = data.get('industry_limit')
     build_industry_dictionary = bool(data.get('build_industry_dictionary', True))
     tasks = data.get('tasks') or {}
     db = get_db()
     latest_task = _latest_active_task(db)
-    
+
     active_task_running = _is_active_task(latest_task)
     if latest_task and latest_task.status != 'running':
         db.commit()
@@ -4759,7 +4764,7 @@ def start_screening_update():
             'error': '更新任务正在进行中',
             'status': _task_to_update_status(latest_task)
         }), 409
-    
+
     # 在后台线程执行更新
     task = _create_data_fetch_task(
         db,
@@ -4768,7 +4773,6 @@ def start_screening_update():
             'fund_types': fund_types,
             'limit': limit,
             'mode': mode,
-            'nav_limit': precise_limit,
             'industry_limit': industry_limit,
             'build_industry_dictionary': build_industry_dictionary,
             'tasks': tasks,
@@ -4777,18 +4781,17 @@ def start_screening_update():
     )
 
     thread = threading.Thread(
-        target=batch_update_fund_data, 
-        args=(fund_types, limit, mode, precise_limit, task.id, industry_limit, tasks, build_industry_dictionary)
+        target=batch_update_fund_data,
+        args=(fund_types, limit, mode, task.id, industry_limit, tasks, build_industry_dictionary)
     )
     thread.daemon = True
     thread.start()
-    
+
     return jsonify({
         'message': '更新任务已启动',
         'fund_types': fund_types,
         'limit': limit,
         'mode': mode,
-        'nav_limit': precise_limit,
         'industry_limit': industry_limit,
         'build_industry_dictionary': build_industry_dictionary,
         'tasks': tasks,

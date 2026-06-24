@@ -9,7 +9,7 @@ import json
 import re
 from datetime import datetime
 from typing import Dict, List, Any, Union
-from stock_service import StockService, get_stock_info_ds_first
+from stock_service import StockService
 
 # --- 数据清洗器 (原 api_handler.py) ---
 
@@ -222,23 +222,61 @@ class FundDataCleaner:
         return market if market else '--'
 
     def clean_portfolio_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """清洗投资组合数据"""
+        """清洗投资组合数据（批量获取股票参考信息，减少请求次数）"""
         # 获取原始代码列表
         stock_codes_raw = self.clean_array_data(raw_data.get('stockCodes'))
-        
-        # 转换为包含名称的对象列表
+
+        # Phase 1: 归一化去重
+        code_pairs = []  # [(normalized_code, original_code), ...]
+        seen = set()
+        for code in stock_codes_raw:
+            normalized = self.stock_service.normalize_code(code)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                code_pairs.append((normalized, code))
+            elif not normalized:
+                code_pairs.append(('', code))
+
+        unique_codes = [p[0] for p in code_pairs if p[0]]
+
+        # Phase 2: 批量请求 DataService（一次网络调用代替 N 次）
+        ds_lookup = {}
+        if unique_codes:
+            try:
+                from services.data_service_client import get_data_service_client
+                result = get_data_service_client().get_stock_references(unique_codes)
+                items = result.get('data', {}).get('items', []) if isinstance(result, dict) else []
+                for item in (items or []):
+                    if isinstance(item, dict) and item.get('success'):
+                        data = item.get('data', {})
+                        if data and isinstance(data, dict):
+                            ds_lookup[item['code']] = data
+            except Exception as e:
+                print(f"clean_portfolio_data: batch DataService call failed: {e}")
+
+        # Phase 3: 逐只拼装（优先用批量结果，缺失时回退本地 StockService 缓存）
         enriched_stocks = []
         if stock_codes_raw:
             for code in stock_codes_raw:
                 try:
-                    stock_info = get_stock_info_ds_first(code)  # DataService-first adapter
-                    display_code = self.stock_service.normalize_code(code)
+                    normalized = self.stock_service.normalize_code(code)
+                    display_code = normalized or str(code)
+
+                    ds_data = ds_lookup.get(normalized)
+                    if ds_data:
+                        name = ds_data.get('name') or display_code
+                        market = ds_data.get('market') or '--'
+                    else:
+                        # Fallback to local StockService in-memory cache
+                        info = self.stock_service.get_stock_info(code)
+                        name = info.get('name', display_code) if info else display_code
+                        market = info.get('market', '--') if info else '--'
 
                     enriched_stocks.append({
                         'code': display_code,
                         'original_code': code,
-                        'name': stock_info.get('name', 'Unknown'),
-                        'market': self._normalize_market(stock_info.get('market', '--'), display_code),
+                        'name': str(name),
+                        'market': self._normalize_market(str(market), display_code),
                         'ratio': 0  # 数据源缺失占比，设为0
                     })
                 except Exception as e:

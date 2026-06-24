@@ -3,14 +3,17 @@ import { AppError, assertCode } from '../core/errors.js';
 import { ProviderChain } from '../core/providerChain.js';
 import type { StockReferenceDto } from '../models/stock.js';
 import { EastMoneyStockProvider } from '../providers/eastmoney/eastmoneyStockProvider.js';
+import { TencentStockProvider } from '../providers/tencent/tencentStockProvider.js';
 import type { ProviderChainResult, StockProvider } from '../providers/types.js';
 import type { ServiceResult } from '../types/common.js';
 
+const tencentStockProvider = new TencentStockProvider();
 const eastMoneyStockProvider = new EastMoneyStockProvider();
 
 export async function getStockReference(code: string): Promise<ServiceResult<StockReferenceDto>> {
   const stockCode = assertStockCode(code);
-  const chain = new ProviderChain<StockProvider>([eastMoneyStockProvider]);
+  // Tencent first (stable for name/market), EastMoney fallback (adds industry/concepts)
+  const chain = new ProviderChain<StockProvider>([tencentStockProvider, eastMoneyStockProvider]);
   const result = await cacheThrough(`stock:reference:${stockCode}`, ttl.stockReference, () =>
     chain.run('stock.reference', (provider) => provider.reference(stockCode))
   );

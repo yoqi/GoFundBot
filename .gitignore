@@ -9,6 +9,4 @@ Frontend/dist/
 Backend/static/
 *.bak
 *.tmp
-Backend/Data/fund_list_cache.json
-Backend/Data/sector_rank_cache.json
-Backend/Data/stock_list_cache.json
+Backend/Data
