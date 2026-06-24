@@ -23,7 +23,7 @@
     <!-- Overview Box -->
     <div class="overview-box">
       <div class="overview-head">
-        <div class="title-with-icon">📊 投资总览</div>
+        <div class="title-with-icon">📊 投资总览<span v-if="activeTab.startsWith('group_')" class="scope-tag">{{ portfolioGroups.find(g => 'group_' + g.id === activeTab)?.name || '' }}</span><span v-else-if="activeTab==='rebalance'" class="scope-tag">再平衡</span><span v-else-if="activeTab==='dividend'" class="scope-tag">红利低波</span></div>
         <div class="meta-info">实时数据来自互联网，仅供参考。数据更新时间: {{ nowTime }}</div>
       </div>
       <div class="overview-grid" v-if="hasHoldings">
@@ -77,13 +77,47 @@
       <div class="ctab" :class="{active: activeTab==='all'}" @click="activeTab='all'">
         👜 基金持仓
       </div>
-      <div class="ctab" :class="{active: activeTab==='rebalance'}" @click="activeTab='rebalance'">⚖️ 再平衡管理</div>
-      <div class="ctab" :class="{active: activeTab==='dividend'}" @click="activeTab='dividend'">📉 红利低波</div>
+      <div
+        v-for="g in portfolioGroups"
+        :key="g.id"
+        class="ctab"
+        :class="{active: activeTab === 'group_' + g.id}"
+        @click="activeTab = 'group_' + g.id"
+        @contextmenu.prevent="openGroupContextMenu($event, g.id)"
+      >
+        📁 {{ g.name }}
+      </div>
+      <button class="ctab btn-add-group" @click="openAddGroupModal" title="新建分组">+ 📁</button>
+      <div v-if="hasRebalanceFunds" class="ctab" :class="{active: activeTab==='rebalance'}" @click="activeTab='rebalance'">⚖️ 再平衡管理</div>
+      <label v-if="activeTab === 'rebalance'" class="threshold-label" @click.stop>
+        ≥<input v-model.number="rebalanceThreshold" type="number" min="1" step="1" class="threshold-input" />%
+      </label>
+      <div v-if="hasDividendFunds" class="ctab" :class="{active: activeTab==='dividend'}" @click="activeTab='dividend'">📉 红利低波</div>
+    </div>
+
+    <!-- Context menu for group tabs -->
+    <div
+      v-if="contextMenu.show"
+      class="context-menu"
+      :style="{left: contextMenu.x + 'px', top: contextMenu.y + 'px'}"
+      @click.stop
+    >
+      <div class="context-menu-item" @click="renameGroupFromMenu">✏️ 重命名</div>
+      <div class="context-menu-item danger" @click="deleteGroupFromMenu">🗑️ 删除分组</div>
     </div>
 
     <!-- Card Grid -->
     <div class="fund-grid" v-if="displayFunds.length">
-      <div v-for="fund in displayFunds" :key="fund.code" class="fund-item-card">
+      <div
+        v-for="(fund, index) in displayFunds"
+        :key="fund.code"
+        class="fund-item-card"
+        :class="{ dragging: dragIndex === index }"
+        :draggable="activeTab === 'all'"
+        @dragstart="activeTab === 'all' && onDragStart($event, index)"
+        @dragend="onDragEnd"
+        @dragover="onDragOver($event, index)"
+      >
         <div class="card-head">
           <button class="c-title detail-link" @click.stop="openFundDetail(fund)" title="查看基金详情">{{ fund.name }}</button>
           <button class="btn-del" @click.stop="removeFund(fund.code)">删除</button>
@@ -92,6 +126,16 @@
           <span class="tag code-tag">{{ fund.code }}</span>
           <span class="tag red" v-if="holdings[fund.code]">持仓</span>
           <span class="tag pink">场外</span>
+          <div class="group-assign-wrapper" @click.stop>
+            <select
+              class="group-assign-select"
+              :value="fundGroupMap[fund.code] || ''"
+              @change="assignFundToGroup(fund.code, $event.target.value || null)"
+            >
+              <option value="">📂 未分组</option>
+              <option v-for="g in portfolioGroups" :key="g.id" :value="g.id">{{ g.name }}</option>
+            </select>
+          </div>
         </div>
         <div v-if="false" class="c-mid-tabs">
           <div
@@ -128,8 +172,8 @@
           <div class="c-h-head">
             <span class="c-h-title">👜 持仓信息 <span class="c-h-pen">📄 1笔</span></span>
             <div class="c-h-actions">
-              <button class="btn-sm b-buy" @click.stop="openTradeModal(fund, 'buy')">买入</button>
-              <button class="btn-sm b-sell" @click.stop="openTradeModal(fund, 'sell')">卖出</button>
+              <button class="btn-sm b-trade" @click.stop="openTradeModal(fund, 'buy')">买卖</button>
+              <button v-if="holdings[fund.code]" class="btn-sm b-edit" @click.stop="openEditModal(fund)">修改</button>
             </div>
           </div>
           <div class="c-h-grid" v-if="holdings[fund.code]">
@@ -163,7 +207,7 @@
             </div>
           </div>
           <div class="c-h-grid empty" v-else>
-            <button class="btn-sm b-buy" @click.stop="openHoldingModal(fund)">录入持仓</button>
+            <button class="btn-sm b-trade" @click.stop="openEditModal(fund)">录入持仓</button>
           </div>
         </div>
 
@@ -270,22 +314,13 @@
       <div class="modal-box holding-modal">
         <div class="modal-title-row holding-title-row">
           <div>
-            <div class="modal-kicker">持仓管理</div>
-            <h3>{{ modalTab === 'set' ? '设置持仓' : '加减仓' }}</h3>
+            <div class="modal-kicker">买卖交易</div>
+            <h3>{{ holdingModal.fund?.name }} <span class="fund-code-sm">#{{ holdingModal.fund?.code }}</span></h3>
           </div>
           <button class="modal-close" @click="closeHoldingModal" aria-label="关闭">×</button>
         </div>
 
-        <div class="modal-tabs elegant-tabs holding-tabs">
-          <button class="modal-tab" :class="{ active: modalTab === 'set' }" @click="modalTab = 'set'">设置持仓</button>
-          <button class="modal-tab" :class="{ active: modalTab === 'trade' }" @click="modalTab = 'trade'">加减仓</button>
-        </div>
-
         <div class="fund-modal-info holding-summary-card">
-          <div class="fund-summary-main">
-            <span class="fund-name">{{ holdingModal.fund?.name }}</span>
-            <span class="fund-code">#{{ holdingModal.fund?.code }}</span>
-          </div>
           <div class="fund-nav-info">
             <div>
               <span class="nav-label">上一交易日净值</span>
@@ -295,27 +330,7 @@
           </div>
         </div>
 
-        <div v-if="modalTab === 'set'" class="set-holding-form">
-          <div class="form-group elegant-input-group">
-            <label>持有金额 (元)</label>
-            <div class="input-wrapper">
-              <span class="prefix">¥</span>
-              <input v-model.number="holdingForm.amount" type="number" step="any" placeholder="请输入当前持有金额" class="modal-input no-border highlight" />
-            </div>
-          </div>
-          <div class="form-group elegant-input-group">
-            <label>买入日期</label>
-            <div class="input-wrapper date-wrapper">
-              <input v-model="holdingForm.buyDate" type="date" class="modal-input no-border" :max="todayDate" />
-            </div>
-          </div>
-          <div class="modal-actions elegant-actions">
-            <button class="elegant-btn-cancel" @click="closeHoldingModal">取消</button>
-            <button class="elegant-btn-confirm buy" @click="saveHolding" :disabled="!holdingForm.amount">保存</button>
-          </div>
-        </div>
-
-        <div v-if="modalTab === 'trade'" class="elegant-trade-box">
+        <div class="elegant-trade-box">
           <div class="trade-toggle">
             <div
               class="trade-toggle-btn buy"
@@ -385,10 +400,71 @@
         </div>
       </div>
     </div>
+
+    <!-- Group management modal -->
+    <div v-if="showGroupModal" class="modal-overlay" @click.self="closeGroupModal">
+      <div class="modal-box group-modal">
+        <div class="modal-title-row">
+          <h3>{{ editingGroup ? '重命名分组' : '新建分组' }}</h3>
+          <button class="modal-close" @click="closeGroupModal" aria-label="关闭">×</button>
+        </div>
+        <input
+          v-model="groupName"
+          type="text"
+          placeholder="请输入分组名称"
+          class="modal-input group-name-input"
+          @keyup.enter="saveGroup"
+          autofocus
+        />
+        <div class="modal-actions">
+          <button class="btn" @click="closeGroupModal">取消</button>
+          <button class="btn btn-primary" @click="saveGroup" :disabled="!groupName.trim()">
+            {{ editingGroup ? '保存' : '创建' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Standalone set/edit holding modal -->
+    <div v-if="showEditModal" class="modal-overlay" @click.self="closeEditModal">
+      <div class="modal-box holding-modal">
+        <div class="modal-title-row holding-title-row">
+          <div>
+            <div class="modal-kicker">{{ holdings[editForm.fund?.code] ? '修改持仓' : '设置持仓' }}</div>
+            <h3>{{ editForm.fund?.name }} <span class="fund-code-sm">#{{ editForm.fund?.code }}</span></h3>
+          </div>
+          <button class="modal-close" @click="closeEditModal" aria-label="关闭">×</button>
+        </div>
+
+        <div class="set-holding-form">
+          <div class="form-group elegant-input-group">
+            <label>持有金额 (元)</label>
+            <div class="input-wrapper">
+              <span class="prefix">¥</span>
+              <input v-model.number="editForm.amount" type="number" step="any" placeholder="请输入当前持有金额" class="modal-input no-border highlight" />
+            </div>
+          </div>
+          <div class="form-group elegant-input-group">
+            <label>持有收益 (元)</label>
+            <div class="input-wrapper">
+              <span class="prefix">¥</span>
+              <input v-model.number="editForm.profit" type="number" step="any" placeholder="0" class="modal-input no-border" />
+            </div>
+          </div>
+          <div class="form-group elegant-input-group" v-if="editForm.fund">
+            <label class="hint-label">份额按最新公布净值 ¥{{ parseFloat(editForm.fund.dwjz || '').toFixed(4) || '—' }} 自动计算</label>
+          </div>
+          <div class="modal-actions elegant-actions">
+            <button class="elegant-btn-cancel" @click="closeEditModal">取消</button>
+            <button class="elegant-btn-confirm buy" @click="saveEdit" :disabled="!editForm.amount">保存修改</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 <script>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { fundAPI } from '../services/api'
 
 export default {
@@ -420,11 +496,29 @@ export default {
 
     // 持仓弹窗
     const holdingModal = ref({ open: false, fund: null })
-    const holdingForm = ref({ amount: '', buyDate: todayDate.value })
-    const modalTab = ref('set')
     const tradeForm = ref({ type: 'buy', inputValue: '', tradeDate: todayDate.value })
     const pendingTxns = ref([])   // 挂起交易列表
     const showPending = ref(false)
+
+    // 拖拽排序
+    const dragIndex = ref(null)
+    const dragOverIndex = ref(null)
+    const fundOrder = ref([])
+
+    // 持仓分组
+    const portfolioGroups = ref([])
+    const fundGroupMap = ref({})
+    const showGroupModal = ref(false)
+    const editingGroup = ref(null)
+    const groupName = ref('')
+    const contextMenu = ref({ show: false, x: 0, y: 0, groupId: null })
+
+    // 再平衡阈值（百分比）
+    const rebalanceThreshold = ref(8)
+
+    // 独立修改弹窗
+    const showEditModal = ref(false)
+    const editForm = ref({ fund: null, amount: '', profit: 0 })
 
     // ==================== 计算属性 ====================
     const isTradingTime = computed(() => {
@@ -445,8 +539,14 @@ export default {
     }
 
     const sortedFunds = computed(() => {
+      const orderMap = {}
+      fundOrder.value.forEach((code, i) => { orderMap[code] = i })
+      funds.value.forEach(f => { if (!(f.code in orderMap)) orderMap[f.code] = Infinity })
+
       const list = [...funds.value]
       list.sort((a, b) => {
+        const orderDiff = orderMap[a.code] - orderMap[b.code]
+        if (orderDiff !== 0) return orderDiff
         const aVal = metricBySort(a, sortBy.value)
         const bVal = metricBySort(b, sortBy.value)
         if (sortBy.value === 'todayProfitAsc') return aVal - bVal
@@ -457,6 +557,10 @@ export default {
 
     const displayFunds = computed(() => {
       if (activeTab.value === 'all') return sortedFunds.value
+      if (activeTab.value.startsWith('group_')) {
+        const groupId = activeTab.value.replace('group_', '')
+        return sortedFunds.value.filter(f => fundGroupMap.value[f.code] === groupId)
+      }
       if (activeTab.value === 'rebalance') {
         return sortedFunds.value.filter(f => {
           const h = holdings.value[f.code]
@@ -464,7 +568,7 @@ export default {
           const amount = getHoldingEstimatedAmount(f)
           if (!amount) return false
           const diffRatio = Math.abs(getHoldingProfitTotal(f) / amount)
-          return diffRatio >= 0.08
+          return diffRatio >= rebalanceThreshold.value / 100
         })
       }
       if (activeTab.value === 'dividend') {
@@ -474,26 +578,44 @@ export default {
     })
 
     const emptyTitle = computed(() => {
+      if (activeTab.value.startsWith('group_')) {
+        const g = portfolioGroups.value.find(g => 'group_' + g.id === activeTab.value)
+        return g ? `”${g.name}” 分组暂无基金` : '暂无基金'
+      }
       if (activeTab.value === 'rebalance') return '暂无需要再平衡的基金'
-      if (activeTab.value === 'dividend') return '暂无匹配“红利低波”主题的基金'
+      if (activeTab.value === 'dividend') return '暂无匹配”红利低波”主题的基金'
       return '暂无基金'
     })
 
     const emptyHint = computed(() => {
-      if (activeTab.value === 'rebalance') return '当前持仓波动处于合理范围'
-      if (activeTab.value === 'dividend') return '请添加名称包含“红利 / 低波 / 股息”等关键词基金'
+      if (activeTab.value.startsWith('group_')) return '将基金分配到该分组即可在此查看'
+      if (activeTab.value === 'rebalance') return `当前持仓波动处于 ±${rebalanceThreshold.value}% 以内`
+      if (activeTab.value === 'dividend') return '请添加名称包含”红利 / 低波 / 股息”等关键词基金'
       return '点击添加基金后，搜索基金名称或代码即可加入持仓列表'
     })
 
     const hasHoldings = computed(() => {
-      return Object.keys(holdings.value).some(code => 
-        funds.value.some(f => f.code === code)
-      )
+      return displayFunds.value.some(f => holdings.value[f.code] && holdings.value[f.code].share)
+    })
+
+    const hasRebalanceFunds = computed(() => {
+      return funds.value.some(f => {
+        const h = holdings.value[f.code]
+        if (!h || !h.share) return false
+        const amount = getHoldingEstimatedAmount(f)
+        if (!amount) return false
+        return Math.abs(getHoldingProfitTotal(f) / amount) >= rebalanceThreshold.value / 100
+      })
+    })
+
+    const hasDividendFunds = computed(() => {
+      return funds.value.some(f => /红利|低波|价值|股息|高股息/.test(f.name || ''))
     })
 
     const totalAsset = computed(() => {
+      const scope = displayFunds.value
       let total = 0
-      funds.value.forEach(fund => {
+      scope.forEach(fund => {
         const h = holdings.value[fund.code]
         if (h && h.share) {
           total += getHoldingEstimatedAmount(fund)
@@ -503,8 +625,9 @@ export default {
     })
 
     const totalProfitToday = computed(() => {
+      const scope = displayFunds.value
       let total = 0
-      funds.value.forEach(fund => {
+      scope.forEach(fund => {
         const h = holdings.value[fund.code]
         if (h && h.share) {
           total += getHoldingProfitToday(fund)
@@ -514,8 +637,9 @@ export default {
     })
 
     const totalPreviousAsset = computed(() => {
+      const scope = displayFunds.value
       let total = 0
-      funds.value.forEach(fund => {
+      scope.forEach(fund => {
         const h = holdings.value[fund.code]
         if (h && h.share) {
           total += h.share * getPreviousPrice(fund)
@@ -525,8 +649,9 @@ export default {
     })
 
     const totalProfitTotal = computed(() => {
+      const scope = displayFunds.value
       let total = 0
-      funds.value.forEach(fund => {
+      scope.forEach(fund => {
         const h = holdings.value[fund.code]
         if (h && h.share && h.cost) {
           total += getHoldingProfitTotal(fund)
@@ -536,8 +661,9 @@ export default {
     })
 
     const totalCost = computed(() => {
+      const scope = displayFunds.value
       let total = 0
-      funds.value.forEach(fund => {
+      scope.forEach(fund => {
         const h = holdings.value[fund.code]
         if (h && h.share && h.cost) {
           total += h.share * h.cost
@@ -650,8 +776,13 @@ export default {
     const getHoldingProfitTotal = (fund) => {
       const h = holdings.value[fund.code]
       if (!h || !h.share || !h.cost) return 0
-      const nav = getCurrentPrice(fund)
-      return (nav - h.cost) * h.share
+      const stored = h.profit ?? 0
+      // 净值未公布时：显示存储收益 + 当日估算变动
+      // 净值已公布后：只显示存储收益
+      if (hasFreshEstimate(fund)) {
+        return stored + getHoldingProfitToday(fund)
+      }
+      return stored
     }
 
     const getHoldingProfitTodayClass = (fund) => getValueClass(getHoldingProfitToday(fund))
@@ -1051,8 +1182,10 @@ export default {
       refreshing.value = true
       try {
         const data = await fetchFundData(String(code))
-        funds.value = [data, ...funds.value]
+        funds.value = [...funds.value, data]
         localStorage.setItem('realtime_funds', JSON.stringify(funds.value))
+        fundOrder.value = [...fundOrder.value.filter(c => c !== String(code)), String(code)]
+        localStorage.setItem('realtime_fund_order', JSON.stringify(fundOrder.value))
       } catch(e) {
           console.error(e)
       } finally {
@@ -1087,9 +1220,11 @@ export default {
       refreshing.value = true
       try {
         const data = await fetchFundData(fund.CODE)
-        const updated = [data, ...funds.value]
+        const updated = [...funds.value, data]
         funds.value = updated
         localStorage.setItem('realtime_funds', JSON.stringify(updated))
+        fundOrder.value = [...fundOrder.value.filter(c => c !== fund.CODE), fund.CODE]
+        localStorage.setItem('realtime_fund_order', JSON.stringify(fundOrder.value))
         closeAddFundModal()
       } catch (e) {
         console.error(`添加基金 ${fund.CODE} 失败`, e)
@@ -1121,9 +1256,12 @@ export default {
         }
         
         if (newFunds.length > 0) {
-          const updated = [...newFunds, ...funds.value]
+          const updated = [...funds.value, ...newFunds]
           funds.value = updated
           localStorage.setItem('realtime_funds', JSON.stringify(updated))
+          const newCodes = newFunds.map(f => f.code)
+          fundOrder.value = [...fundOrder.value, ...newCodes]
+          localStorage.setItem('realtime_fund_order', JSON.stringify(fundOrder.value))
         }
         
         selectedFunds.value = []
@@ -1172,65 +1310,193 @@ export default {
     const removeFund = (code) => {
       funds.value = funds.value.filter(f => f.code !== code)
       localStorage.setItem('realtime_funds', JSON.stringify(funds.value))
+      fundOrder.value = fundOrder.value.filter(c => c !== code)
+      localStorage.setItem('realtime_fund_order', JSON.stringify(fundOrder.value))
+      if (fundGroupMap.value[code]) {
+        const newMap = { ...fundGroupMap.value }
+        delete newMap[code]
+        fundGroupMap.value = newMap
+        localStorage.setItem('realtime_fund_group_map', JSON.stringify(newMap))
+      }
       if (activeTab.value !== 'all' && displayFunds.value.length === 0) {
         activeTab.value = 'all'
       }
     }
 
+    // 拖拽排序
+    const onDragStart = (event, index) => {
+      dragIndex.value = index
+      event.dataTransfer.effectAllowed = 'move'
+    }
+
+    const onDragOver = (event, index) => {
+      event.preventDefault()
+      dragOverIndex.value = index
+    }
+
+    const onDragEnd = () => {
+      if (dragIndex.value !== null && dragOverIndex.value !== null && dragIndex.value !== dragOverIndex.value) {
+        const displayCodes = displayFunds.value.map(f => f.code)
+        const [moved] = displayCodes.splice(dragIndex.value, 1)
+        displayCodes.splice(dragOverIndex.value, 0, moved)
+        fundOrder.value = displayCodes
+        localStorage.setItem('realtime_fund_order', JSON.stringify(displayCodes))
+      }
+      dragIndex.value = null
+      dragOverIndex.value = null
+    }
+
+    // 分组管理
+    const openAddGroupModal = () => {
+      editingGroup.value = null
+      groupName.value = ''
+      showGroupModal.value = true
+      nextTick(() => {
+        const input = document.querySelector('.group-name-input')
+        if (input) input.focus()
+      })
+    }
+
+    const openEditGroupModal = (group) => {
+      editingGroup.value = group
+      groupName.value = group.name
+      showGroupModal.value = true
+      nextTick(() => {
+        const input = document.querySelector('.group-name-input')
+        if (input) input.focus()
+      })
+    }
+
+    const closeGroupModal = () => {
+      showGroupModal.value = false
+      editingGroup.value = null
+      groupName.value = ''
+    }
+
+    const saveGroup = () => {
+      const name = groupName.value.trim()
+      if (!name) return
+      if (editingGroup.value) {
+        const idx = portfolioGroups.value.findIndex(g => g.id === editingGroup.value.id)
+        if (idx !== -1) portfolioGroups.value[idx].name = name
+      } else {
+        portfolioGroups.value.push({
+          id: 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+          name
+        })
+      }
+      localStorage.setItem('realtime_portfolio_groups', JSON.stringify(portfolioGroups.value))
+      closeGroupModal()
+    }
+
+    const deleteGroup = (groupId) => {
+      const group = portfolioGroups.value.find(g => g.id === groupId)
+      if (!group) return
+      if (!confirm(`确定删除分组"${group.name}"吗？分组内的基金将回到默认状态。`)) return
+      const newMap = { ...fundGroupMap.value }
+      Object.keys(newMap).forEach(code => {
+        if (newMap[code] === groupId) delete newMap[code]
+      })
+      fundGroupMap.value = newMap
+      localStorage.setItem('realtime_fund_group_map', JSON.stringify(newMap))
+      portfolioGroups.value = portfolioGroups.value.filter(g => g.id !== groupId)
+      localStorage.setItem('realtime_portfolio_groups', JSON.stringify(portfolioGroups.value))
+      if (activeTab.value === 'group_' + groupId) activeTab.value = 'all'
+    }
+
+    const assignFundToGroup = (fundCode, groupId) => {
+      const newMap = { ...fundGroupMap.value }
+      if (!groupId) {
+        delete newMap[fundCode]
+      } else {
+        newMap[fundCode] = groupId
+      }
+      fundGroupMap.value = newMap
+      localStorage.setItem('realtime_fund_group_map', JSON.stringify(newMap))
+    }
+
+    // 分组右键菜单
+    const openGroupContextMenu = (event, groupId) => {
+      contextMenu.value = { show: true, x: event.clientX, y: event.clientY, groupId }
+    }
+
+    const closeContextMenu = () => {
+      contextMenu.value = { ...contextMenu.value, show: false }
+    }
+
+    const renameGroupFromMenu = () => {
+      const group = portfolioGroups.value.find(g => g.id === contextMenu.value.groupId)
+      if (group) openEditGroupModal(group)
+      closeContextMenu()
+    }
+
+    const deleteGroupFromMenu = () => {
+      deleteGroup(contextMenu.value.groupId)
+      closeContextMenu()
+    }
+
     // 持仓弹窗
     const openHoldingModal = (fund) => {
       holdingModal.value = { open: true, fund }
-      const h = holdings.value[fund.code]
-      // 如果有现有持仓，根据份额和净值计算金额
-      if (h && h.share) {
-        const nav = h.cost || parseFloat(fund.dwjz) || 1
-        holdingForm.value = {
-          amount: (h.share * nav).toFixed(2),
-          buyDate: h.buy_date || fund.jzrq || todayDate.value
-        }
-      } else {
-        holdingForm.value = { amount: '', buyDate: fund.jzrq || todayDate.value }
-      }
-      // 重置加减仓表单
-      modalTab.value = h && h.share ? 'trade' : 'set'
       tradeForm.value = { type: 'buy', inputValue: '', tradeDate: todayDate.value }
     }
 
     const openTradeModal = (fund, type) => {
       openHoldingModal(fund)
-      modalTab.value = 'trade'
       tradeForm.value.type = type
+    }
+
+    const openEditModal = (fund) => {
+      const h = holdings.value[fund.code]
+      const currentNav = getCurrentPrice(fund) || parseFloat(fund.dwjz) || 1
+      // 已有持仓无 profit 字段时，取当前市场盈亏作为默认值，避免覆盖为 0
+      let defaultProfit = 0
+      if (h) {
+        defaultProfit = h.profit ?? ((currentNav - h.cost) * h.share)
+      }
+      editForm.value = {
+        fund,
+        amount: h ? (h.share * currentNav).toFixed(2) : '',
+        profit: parseFloat(defaultProfit.toFixed(2))
+      }
+      showEditModal.value = true
+    }
+
+    const closeEditModal = () => {
+      showEditModal.value = false
+      editForm.value = { fund: null, amount: '', profit: 0 }
+    }
+
+    const saveEdit = () => {
+      const fund = editForm.value.fund
+      if (!fund) return
+
+      const amount = parseFloat(editForm.value.amount)
+      const profit = parseFloat(editForm.value.profit) || 0
+      // Auto-determine nav: use latest published nav (dwjz)
+      const nav = parseFloat(fund.dwjz) || getCurrentPrice(fund) || 1
+
+      if (!amount || !nav || nav <= 0) {
+        closeEditModal()
+        return
+      }
+
+      const share = amount / nav
+      const newHoldings = { ...holdings.value }
+      newHoldings[fund.code] = {
+        share,
+        cost: nav,
+        buy_date: fund.jzrq || todayDate.value,
+        profit: parseFloat(profit.toFixed(2))
+      }
+
+      holdings.value = newHoldings
+      localStorage.setItem('realtime_holdings', JSON.stringify(newHoldings))
+      closeEditModal()
     }
 
     const closeHoldingModal = () => {
       holdingModal.value = { open: false, fund: null }
-    }
-
-    const saveHolding = () => {
-      const fund = holdingModal.value.fund
-      if (!fund) return
-      
-      const amount = parseFloat(holdingForm.value.amount)
-      const buyDate = holdingForm.value.buyDate || fund.jzrq || todayDate.value
-      const nav = getFundNavByDate(fund, buyDate)
-      
-      if (!amount || !nav || nav <= 0) {
-        closeHoldingModal()
-        return
-      }
-      
-      const share = amount / nav
-      
-      const newHoldings = { ...holdings.value }
-      newHoldings[fund.code] = {
-        share: share,
-        cost: nav,
-        buy_date: buyDate
-      }
-      
-      holdings.value = newHoldings
-      localStorage.setItem('realtime_holdings', JSON.stringify(newHoldings))
-      closeHoldingModal()
     }
 
     const clearHolding = () => {
@@ -1301,7 +1567,8 @@ export default {
         newHoldings[fund.code] = {
           share: newTotalShares,
           cost: newAvgCost,
-          buy_date: h.buy_date || tradeDate || tradeForm.value.tradeDate
+          buy_date: h.buy_date || tradeDate || tradeForm.value.tradeDate,
+          profit: h.profit ?? 0
         }
       } else {
         // 卖出：inputValue 是份额
@@ -1312,7 +1579,8 @@ export default {
           newHoldings[fund.code] = {
             share: newTotalShares,
             cost: h.cost,
-            buy_date: h.buy_date
+            buy_date: h.buy_date,
+            profit: h.profit ?? 0
           }
         }
       }
@@ -1420,6 +1688,9 @@ export default {
         funds: funds.value,
         holdings: holdings.value,
         pendingTxns: pendingTxns.value,
+        fundOrder: fundOrder.value,
+        portfolioGroups: portfolioGroups.value,
+        fundGroupMap: fundGroupMap.value,
         exportedAt: new Date().toISOString()
       }
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
@@ -1450,6 +1721,18 @@ export default {
         if (Array.isArray(parsed.pendingTxns)) {
           pendingTxns.value = parsed.pendingTxns
           localStorage.setItem('realtime_pending_txns', JSON.stringify(parsed.pendingTxns))
+        }
+        if (Array.isArray(parsed.fundOrder)) {
+          fundOrder.value = parsed.fundOrder
+          localStorage.setItem('realtime_fund_order', JSON.stringify(parsed.fundOrder))
+        }
+        if (Array.isArray(parsed.portfolioGroups)) {
+          portfolioGroups.value = parsed.portfolioGroups
+          localStorage.setItem('realtime_portfolio_groups', JSON.stringify(parsed.portfolioGroups))
+        }
+        if (parsed.fundGroupMap && typeof parsed.fundGroupMap === 'object') {
+          fundGroupMap.value = parsed.fundGroupMap
+          localStorage.setItem('realtime_fund_group_map', JSON.stringify(parsed.fundGroupMap))
         }
         refreshAll()
       } catch (error) {
@@ -1505,25 +1788,61 @@ export default {
       } catch (e) {
         console.error('加载本地数据失败', e)
       }
-      
+
+      // 加载手动排序
+      try {
+        const savedOrder = JSON.parse(localStorage.getItem('realtime_fund_order') || 'null')
+        if (Array.isArray(savedOrder) && savedOrder.length) {
+          fundOrder.value = savedOrder
+        } else if (Array.isArray(savedFunds) && savedFunds.length) {
+          fundOrder.value = savedFunds.map(f => f.code)
+        }
+      } catch (e) { /* ignore */ }
+
+      // 加载分组
+      try {
+        const savedGroups = JSON.parse(localStorage.getItem('realtime_portfolio_groups') || '[]')
+        if (Array.isArray(savedGroups)) portfolioGroups.value = savedGroups
+      } catch (e) { /* ignore */ }
+
+      // 加载分组映射
+      try {
+        const savedGroupMap = JSON.parse(localStorage.getItem('realtime_fund_group_map') || '{}')
+        if (savedGroupMap && typeof savedGroupMap === 'object') fundGroupMap.value = savedGroupMap
+      } catch (e) { /* ignore */ }
+
       startRefreshTimer()
       updateNowTime()
       timeTimer.value = setInterval(updateNowTime, 60000)
       document.addEventListener('mousedown', handleClickOutside)
+      document.addEventListener('click', closeContextMenu)
       const savedSortBy = localStorage.getItem('realtime_sort_by')
       if (savedSortBy) sortBy.value = savedSortBy
       const savedUser = localStorage.getItem('gofundbot_user')
       if (savedUser) username.value = savedUser
+
+      const savedThreshold = parseInt(localStorage.getItem('realtime_rebalance_threshold') || '8', 10)
+      if (savedThreshold >= 1) rebalanceThreshold.value = savedThreshold
     })
 
     onUnmounted(() => {
       if (refreshTimer.value) clearInterval(refreshTimer.value)
       if (timeTimer.value) clearInterval(timeTimer.value)
       document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('click', closeContextMenu)
     })
 
     watch(sortBy, (value) => {
       localStorage.setItem('realtime_sort_by', value)
+    })
+
+    watch([hasRebalanceFunds, hasDividendFunds], ([hasReb, hasDiv]) => {
+      if (activeTab.value === 'rebalance' && !hasReb) activeTab.value = 'all'
+      if (activeTab.value === 'dividend' && !hasDiv) activeTab.value = 'all'
+    })
+
+    watch(rebalanceThreshold, (val) => {
+      localStorage.setItem('realtime_rebalance_threshold', String(val))
     })
 
     return {
@@ -1550,8 +1869,6 @@ export default {
       searchLoading,
       todayDate,
       holdingModal,
-      holdingForm,
-      modalTab,
       tradeForm,
       isTradingTime,
       sortedFunds,
@@ -1598,8 +1915,12 @@ export default {
       removeFund,
       openHoldingModal,
       openTradeModal,
+      openEditModal,
+      closeEditModal,
+      saveEdit,
+      showEditModal,
+      editForm,
       closeHoldingModal,
-      saveHolding,
       clearHolding,
       saveRefreshMs,
       exportData,
@@ -1614,7 +1935,32 @@ export default {
       canSubmitTrade,
       submitButtonText,
       cancelPendingTxn,
-      settlePendingTxnsIfReady
+      settlePendingTxnsIfReady,
+      hasRebalanceFunds,
+      hasDividendFunds,
+      rebalanceThreshold,
+      dragIndex,
+      dragOverIndex,
+      fundOrder,
+      onDragStart,
+      onDragOver,
+      onDragEnd,
+      portfolioGroups,
+      fundGroupMap,
+      showGroupModal,
+      editingGroup,
+      groupName,
+      contextMenu,
+      openAddGroupModal,
+      openEditGroupModal,
+      closeGroupModal,
+      saveGroup,
+      deleteGroup,
+      assignFundToGroup,
+      openGroupContextMenu,
+      closeContextMenu,
+      renameGroupFromMenu,
+      deleteGroupFromMenu
     }
   }
 }
@@ -1802,8 +2148,8 @@ export default {
 .btn-sm:active {
   transform: translateY(0);
 }
-.b-buy { background: linear-gradient(135deg, #2d8cff 0%, #1f6bff 100%); }
-.b-sell { background: linear-gradient(135deg, #ffb347 0%, #ff8f1f 100%); margin-left: 8px; }
+.b-trade { background: linear-gradient(135deg, #2d8cff 0%, #1f6bff 100%); }
+.b-edit { background: linear-gradient(135deg, #8b9dc3 0%, #64748b 100%); margin-left: 8px; }
 
 .c-h-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid-box { display: flex; justify-content: space-between; font-size: 12px; }
@@ -2267,5 +2613,138 @@ export default {
 .btn-cancel-txn:hover {
   border-color: #f5222d;
   color: #f5222d;
+}
+
+/* --- Drag and Drop --- */
+.fund-item-card.dragging {
+  opacity: 0.5;
+  transform: scale(0.98);
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+/* --- Rebalance Threshold --- */
+.threshold-label {
+  font-size: 12px;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  background: #f3f4f6;
+  border-radius: 12px;
+  cursor: default;
+}
+.threshold-input {
+  width: 48px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 13px;
+  text-align: center;
+  background: #fff;
+}
+.threshold-input:focus {
+  outline: none;
+  border-color: #1677ff;
+}
+
+/* --- Add Group Button --- */
+.btn-add-group {
+  border: 1px dashed #c0c7d0;
+  background: transparent;
+  color: #98a2b3;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 6px 10px;
+  transition: all 0.2s;
+}
+.btn-add-group:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+  background: #f0f5ff;
+}
+
+/* --- Group Assignment Select --- */
+.group-assign-wrapper {
+  margin-left: auto;
+}
+.group-assign-select {
+  padding: 2px 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #6b7280;
+  background: #f9fafb;
+  cursor: pointer;
+  max-width: 100px;
+}
+.group-assign-select:focus {
+  outline: none;
+  border-color: #1677ff;
+}
+
+/* --- Context Menu --- */
+.context-menu {
+  position: fixed;
+  z-index: 2000;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  min-width: 140px;
+  overflow: hidden;
+  padding: 4px 0;
+}
+.context-menu-item {
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #374151;
+  transition: background 0.15s;
+}
+.context-menu-item:hover {
+  background: #f3f4f6;
+}
+.context-menu-item.danger {
+  color: #ef4444;
+}
+.context-menu-item.danger:hover {
+  background: #fef2f2;
+}
+
+/* --- Hint label in forms --- */
+.hint-label {
+  font-size: 11px;
+  color: #98a2b3;
+  font-weight: 400;
+}
+
+/* --- Fund code in modal titles --- */
+.fund-code-sm {
+  font-size: 12px;
+  font-weight: 400;
+  color: #98a2b3;
+  margin-left: 4px;
+}
+
+/* --- Scope Tag in Overview --- */
+.scope-tag {
+  font-size: 12px;
+  font-weight: 500;
+  color: #1677ff;
+  background: #e6f4ff;
+  border-radius: 10px;
+  padding: 2px 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/* --- Group Modal --- */
+.group-modal {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+}
+.group-name-input {
+  margin-bottom: 12px;
 }
 </style>
