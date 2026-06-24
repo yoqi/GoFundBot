@@ -289,10 +289,12 @@ export default {
             const p = params[0]
             if (!p) return ''
             const item = data[p.dataIndex]
+            const pctText = item.change_pct && item.change_pct !== '0.00%' ? ` (${item.change_pct})` : ''
+            const changeText = item.change && item.change !== '0' && item.change !== '+0' ? `${item.change}${pctText}` : pctText.replace(/[()]/g, '')
             return `
               <div>${item.time}</div>
               <div style="font-weight:bold;color:${color}">${item.price}</div>
-              <div>${item.change} (${item.change_pct})</div>
+              ${changeText ? `<div>${changeText}</div>` : ''}
               <div>量: ${item.volume}</div>
             `
           }

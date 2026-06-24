@@ -740,11 +740,13 @@ class FundMasterService:
                             pass
 
                 result.append({
+                    "code": code,
                     "name": name,
                     "price": f"{price:.2f}" if price else "-",
                     "change_pct": f"{'+' if pct >= 0 else ''}{pct:.2f}%",
                     "market": market,
-                    "raw_change": pct
+                    "raw_change": pct,
+                    "prev_close": prev_close
                 })
             if result:
                 return result
@@ -987,86 +989,78 @@ class FundMasterService:
             return {"success": False, "error": str(e), "data": []}
     
     # ==================== 市场指数分时数据 ====================
-    def _get_tencent_intraday(self, code: str) -> list:
+    def _get_sina_intraday(self, code: str) -> list:
         """
-        获取腾讯财经分时数据
+        获取新浪财经5分钟K线数据作为分时走势
         code: sh000001 (上证), sz399001 (深证), sh000300 (沪深300)
+        比腾讯 web.ifzq.gtimg.cn 快 10x+，响应在 200ms 内
         """
         try:
-            url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
+            url = "https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_s=/CN_MarketDataService.getKLineData"
             params = {
-                "code": code,
-                "_": int(time.time() * 1000)
+                "symbol": code,
+                "scale": "5",
+                "ma": "no",
+                "datalen": "240"
             }
-            
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://gu.qq.com/"
+                "Referer": "https://finance.sina.com.cn/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
-            
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            data = response.json()
-            
-            # 解析数据结构: data -> code -> data -> data
-            if data and data.get("code") == 0:
-                stock_data = data.get("data", {}).get(code, {})
-                minute_data = stock_data.get("data", {}).get("data", [])
-                qt_data = stock_data.get("qt", {}).get(code, [])
-                
-                # 获取昨收价用于计算涨跌幅
-                pre_close = 0
-                if qt_data and len(qt_data) >= 5:
-                    try:
-                        pre_close = float(qt_data[4])
-                    except:
-                        pass
-                
-                if not pre_close and "prec" in stock_data.get("data", {}):
-                     try:
-                        pre_close = float(stock_data["data"]["prec"])
-                     except:
-                        pass
-                
-                result = []
-                for point in minute_data:
-                    # 格式: "0930 3350.12 12345 67890" (时间 价格 交易量 成交额)
-                    parts = point.split(" ")
-                    if len(parts) >= 2:
-                        raw_time = parts[0]
-                        time_str = f"{raw_time[:2]}:{raw_time[2:]}" # 0930 -> 09:30
-                        price = float(parts[1])
-                        
-                        # 计算涨跌
-                        change = 0
-                        change_pct = "0.00%"
-                        if pre_close:
-                            change = round(price - pre_close, 2)
-                            pct = (change / pre_close) * 100
-                            change_pct = f"{round(pct, 2)}%"
-                        
-                        # 成交量处理 (腾讯返回的是手，不是金额或股数，这里简单处理)
-                        volume = "-"
-                        if len(parts) >= 3:
-                            volume = parts[2]
-                            
-                        result.append({
-                            "time": time_str,
-                            "price": str(price),
-                            "change": f"{'+' if change > 0 else ''}{change}",
-                            "change_pct": change_pct,
-                            "volume": volume
-                        })
-                return result
-            return []
+            response = requests.get(url, params=params, headers=headers, timeout=8)
+            text = response.text
+
+            # 去掉 JSONP 包装: var _s=([...]);
+            json_start = text.find("([")
+            json_end = text.rfind("])")
+            if json_start < 0 or json_end < 0:
+                return []
+            json_str = text[json_start + 1:json_end + 1]
+            data = json.loads(json_str)
+
+            # 取昨收价（从市场指数总览缓存）
+            pre_close = 0
+            index_cache = self._get_cache('market_index')
+            if index_cache and index_cache.get("data"):
+                for item in index_cache["data"]:
+                    if item.get("code") == code:
+                        pre_close = item.get("prev_close", 0) or 0
+                        break
+
+            result = []
+            for point in data:
+                day = point.get("day", "")
+                close_price = float(point.get("close", 0))
+                volume = point.get("volume", "-")
+
+                # 时间格式: "2026-06-24 09:35:00" -> "09:35"
+                time_part = day.split(" ")[-1] if " " in day else day
+                time_str = time_part[:5]  # "09:35"
+
+                change = 0
+                change_pct = "0.00%"
+                if pre_close:
+                    change = round(close_price - pre_close, 2)
+                    pct = (change / pre_close) * 100
+                    change_pct = f"{round(pct, 2)}%"
+
+                result.append({
+                    "time": time_str,
+                    "price": str(close_price),
+                    "change": f"{'+' if change > 0 else ''}{change}",
+                    "change_pct": change_pct,
+                    "volume": str(volume)
+                })
+            return result
         except Exception as e:
-            print(f"Error fetching tencent intraday for {code}: {e}")
+            print(f"Error fetching sina intraday for {code}: {e}")
             return []
 
     def get_indices_intraday(self) -> dict:
         """
         获取多指数分时数据（上证、深证、沪深300）
-        使用腾讯财经作为数据源
-        
+        数据源：新浪财经5分钟K线（quotes.sina.cn，比腾讯快10x+）
+
         Returns:
             dict: {'sh': [], 'sz': [], 'hs300': [], 'update_time': str}
         """
@@ -1074,7 +1068,10 @@ class FundMasterService:
         cached = self._get_cache(cache_key)
         if cached:
             return cached
-            
+
+        # 先预热指数缓存（获取昨收价用于涨跌幅计算）
+        self.get_market_index()
+
         targets = {
             "sh": "sh000001",
             "sz": "sz399001",
@@ -1083,16 +1080,16 @@ class FundMasterService:
         intraday = {key: [] for key in targets}
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
-                executor.submit(self._get_tencent_intraday, code): key
+                executor.submit(self._get_sina_intraday, code): key
                 for key, code in targets.items()
             }
             for future in as_completed(futures):
                 key = futures[future]
                 try:
-                    intraday[key] = future.result(timeout=6)
+                    intraday[key] = future.result(timeout=5)
                 except Exception as e:
                     print(f"Error fetching intraday index {key}: {e}")
-        
+
         data = {
             "success": True,
             "data": {
@@ -1102,7 +1099,7 @@ class FundMasterService:
             },
             "update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        self._set_cache(cache_key, data, 'sse_30min') # 复用 sse_30min 的 TTL (1分钟)
+        self._set_cache(cache_key, data, 'sse_30min')  # TTL 1分钟
         return data
 
     def get_sse_30min(self) -> dict:

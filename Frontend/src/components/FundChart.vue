@@ -190,15 +190,25 @@ export default {
             .map(item => [item.x, item.y]);
         const filtered = filterByDate(rawData, selectedRange.value).slice().sort((a, b) => a[0] - b[0]);
 
-        if (filtered.length === 0) return { netWorth: [], drawdownInfo: null }
+        if (filtered.length === 0) return { chartData: [], drawdownInfo: null, useRawValues: false }
 
         const startVal = filtered[0][1]
         const endVal = filtered[filtered.length - 1][1]
         fundChange.value = startVal !== 0 ? ((endVal - startVal) / startVal * 100).toFixed(2) : '0.00'
 
-        // Prepare Percentage Data
-        const toPercent = (val) => startVal !== 0 ? parseFloat(((val - startVal) / startVal * 100).toFixed(2)) : 0
+        // 转为百分比（保留4位小数，避免货币基金等低波动品种全部四舍五入为0）
+        const toPercent = (val) => startVal !== 0 ? parseFloat(((val - startVal) / startVal * 100).toFixed(4)) : 0
         const percentTrend = filtered.map(item => [item[0], toPercent(item[1])])
+
+        // 全零检测：如果百分比数据完全无变化（货币基金净值恒为1.0000），
+        // 直接用原始净值绘图，让 ECharts 按数值自动缩放
+        const pctValues = percentTrend.map(p => p[1])
+        const pctRange = Math.max(...pctValues) - Math.min(...pctValues)
+        const useRawValues = pctRange < 0.0001
+
+        const chartData = useRawValues
+          ? filtered.map(item => [item[0], item[1]])           // 原始净值
+          : percentTrend                                        // 百分比
 
         // Calculate Max Drawdown & Recovery
         let curMaxdd = 0;
@@ -260,8 +270,9 @@ export default {
         // But the range selector is hidden for comparison in template: v-if="activeTab !== 'comparison'"
         
         return {
-            netWorth: percentTrend,
-            drawdownInfo: ddInfo
+            chartData,
+            drawdownInfo: ddInfo,
+            useRawValues
         }
     }
 
@@ -294,9 +305,16 @@ export default {
             }
         },
         xAxis: { type: 'time', boundaryGap: false, axisLine: { show: false }, axisTick: { show: false } },
-        yAxis: { 
-            type: 'value', 
-            scale: true, 
+        yAxis: {
+            type: 'value',
+            scale: true,
+            min: function (value) {
+                // 保证 Y 轴至少有 ±0.1% 的可视范围，避免货币基金等低波动品种的走势被挤出图表
+                return value.min - Math.max((value.max - value.min) * 0.15, 0.05)
+            },
+            max: function (value) {
+                return value.max + Math.max((value.max - value.min) * 0.15, 0.05)
+            },
             splitLine: { lineStyle: { type: 'dashed' } },
             axisLabel: { formatter: '{value}%' }
         },
@@ -304,11 +322,12 @@ export default {
       }
 
       if (activeTab.value === 'performance') {
-          const { netWorth } = processData()
+          const { chartData, useRawValues } = processData()
+          const unit = useRawValues ? '' : '%'
           option.series.push({
               name: '本基金',
               type: 'line',
-              data: netWorth,
+              data: chartData,
               smooth: true,
               symbol: 'none',
               lineStyle: { width: 2, color: '#007bff' },
@@ -319,11 +338,13 @@ export default {
                   ])
               }
           })
-          
+
+          option.yAxis.axisLabel.formatter = useRawValues ? '{value}' : '{value}%'
+
           option.tooltip.formatter = function (params) {
               let res = '<div>' + echarts.format.formatTime('yyyy-MM-dd', params[0].value[0]) + '</div>'
               params.forEach(item => {
-                  res += `<div>${item.marker} ${item.seriesName}: ${item.value[1]}%</div>`
+                  res += `<div>${item.marker} ${item.seriesName}: ${item.value[1]}${unit}</div>`
               })
               return res;
           }
@@ -375,13 +396,13 @@ export default {
               }
           }
       } else if (activeTab.value === 'drawdown') {
-          const { netWorth, drawdownInfo } = processData()
-          
-          if (netWorth.length > 0) {
+          const { chartData, drawdownInfo } = processData()
+
+          if (chartData.length > 0) {
               const seriesData = {
                   name: '本基金',
                   type: 'line',
-                  data: netWorth,
+                  data: chartData,
                   smooth: true,
                   symbol: 'none',
                   lineStyle: { width: 2, color: '#88aaff' },
@@ -403,7 +424,7 @@ export default {
               }
               
               if (drawdownInfo && drawdownInfo.peakDate) {
-                  const endDate = drawdownInfo.recoveryDate || netWorth[netWorth.length - 1][0];
+                  const endDate = drawdownInfo.recoveryDate || chartData[chartData.length - 1][0];
                   
                   seriesData.markArea.data.push([
                       { xAxis: drawdownInfo.peakDate },
