@@ -170,7 +170,10 @@
 
         <div class="c-holdings-area">
           <div class="c-h-head">
-            <span class="c-h-title">👜 持仓信息 <span class="c-h-pen">📄 1笔</span></span>
+            <span class="c-h-title">
+              👜 持仓信息
+              <button class="c-h-pen" @click.stop="openTradeHistory(fund)">📄 {{ getFundTradeRecords(fund).length }}笔</button>
+            </span>
             <div class="c-h-actions">
               <button class="btn-sm b-trade" @click.stop="openTradeModal(fund, 'buy')">买卖</button>
               <button v-if="holdings[fund.code]" class="btn-sm b-edit" @click.stop="openEditModal(fund)">修改</button>
@@ -202,7 +205,7 @@
             <div class="grid-box">
               <div class="g-label">收益率</div>
               <div class="g-val" :class="getHoldingProfitTotalClass(fund)">
-                {{ getHoldingCostAmount(fund) > 0 ? ((getHoldingProfitTotal(fund) / getHoldingCostAmount(fund)) * 100 >= 0 ? '+' : '') + ((getHoldingProfitTotal(fund) / getHoldingCostAmount(fund)) * 100).toFixed(2) + '%' : '0.00%' }}
+                {{ getHoldingReturnRate(fund) >= 0 ? '+' : '' }}{{ getHoldingReturnRate(fund).toFixed(2) }}%
               </div>
             </div>
           </div>
@@ -401,6 +404,40 @@
       </div>
     </div>
 
+    <div v-if="tradeHistoryModal.open" class="modal-overlay" @click.self="closeTradeHistory">
+      <div class="modal-box holding-modal trade-history-modal">
+        <div class="modal-title-row holding-title-row">
+          <div>
+            <div class="modal-kicker">买卖记录</div>
+            <h3>{{ tradeHistoryModal.fund?.name }} <span class="fund-code-sm">#{{ tradeHistoryModal.fund?.code }}</span></h3>
+          </div>
+          <button class="modal-close" @click="closeTradeHistory" aria-label="关闭">×</button>
+        </div>
+
+        <div class="trade-history-table" v-if="getFundTradeRecords(tradeHistoryModal.fund).length">
+          <div class="trade-history-row trade-history-head">
+            <span>类型</span>
+            <span>时间</span>
+            <span>金额</span>
+            <span>份额</span>
+            <span>状态</span>
+          </div>
+          <div
+            class="trade-history-row"
+            v-for="record in getFundTradeRecords(tradeHistoryModal.fund)"
+            :key="record.id"
+          >
+            <span class="trade-type" :class="record.type">{{ record.type === 'buy' ? '买' : '卖' }}</span>
+            <span>{{ record.tradeDate || '-' }}</span>
+            <span>¥{{ formatMoney(record.amount) }}</span>
+            <span>{{ formatShare(record.share) }}</span>
+            <span class="trade-status" :class="record.status">{{ getTradeStatusText(record.status) }}</span>
+          </div>
+        </div>
+        <div class="trade-history-empty" v-else>暂无买卖记录</div>
+      </div>
+    </div>
+
     <!-- Group management modal -->
     <div v-if="showGroupModal" class="modal-overlay" @click.self="closeGroupModal">
       <div class="modal-box group-modal">
@@ -498,6 +535,8 @@ export default {
     const holdingModal = ref({ open: false, fund: null })
     const tradeForm = ref({ type: 'buy', inputValue: '', tradeDate: todayDate.value })
     const pendingTxns = ref([])   // 挂起交易列表
+    const tradeRecords = ref([])
+    const tradeHistoryModal = ref({ open: false, fund: null })
     const showPending = ref(false)
 
     // 拖拽排序
@@ -673,8 +712,9 @@ export default {
     })
 
     const totalReturnRate = computed(() => {
-      if (!totalCost.value) return 0
-      return (totalProfitTotal.value / totalCost.value) * 100
+      const principal = totalAsset.value - totalProfitTotal.value
+      if (!principal) return 0
+      return (totalProfitTotal.value / principal) * 100
     })
 
     const todayReturnRate = computed(() => {
@@ -734,6 +774,11 @@ export default {
       return Number.isFinite(nav) && nav > 0 ? nav : 0
     }
 
+    const getLatestPublishedPrice = (fund) => {
+      const nav = parseFloat(fund?.dwjz)
+      return Number.isFinite(nav) && nav > 0 ? nav : 0
+    }
+
     const getPriceStatusLabel = (fund) => hasFreshEstimate(fund) ? '当日估值' : '已更新净值'
 
     const getPreviousPrice = (fund) => {
@@ -747,14 +792,18 @@ export default {
       return Number.isFinite(nav) && nav > 0 ? nav : 0
     }
 
-    // 持仓成本 = 平均成本 × 份额
+    // 持仓金额 = 最新公布净值 × 份额；盘中净值未更新时保持在上一公布净值口径。
     const getHoldingAmount = (fund) => {
+      const h = holdings.value[fund.code]
+      if (!h || !h.share) return 0
+      return h.share * getLatestPublishedPrice(fund)
+    }
+
+    const getHoldingCostAmount = (fund) => {
       const h = holdings.value[fund.code]
       if (!h || !h.share || !h.cost) return 0
       return h.share * h.cost
     }
-
-    const getHoldingCostAmount = (fund) => getHoldingAmount(fund)
 
     // 估算金额 = 估算净值 × 份额
     const getHoldingEstimatedAmount = (fund) => {
@@ -777,12 +826,56 @@ export default {
       const h = holdings.value[fund.code]
       if (!h || !h.share || !h.cost) return 0
       const stored = h.profit ?? 0
-      // 净值未公布时：显示存储收益 + 当日估算变动
-      // 净值已公布后：只显示存储收益
-      if (hasFreshEstimate(fund)) {
-        return stored + getHoldingProfitToday(fund)
+      return hasFreshEstimate(fund) ? stored + getHoldingProfitToday(fund) : stored
+    }
+
+    const getHoldingPrincipalAmount = (fund) => {
+      return getHoldingAmount(fund) - getHoldingProfitTotal(fund)
+    }
+
+    const getHoldingReturnRate = (fund) => {
+      const principal = getHoldingPrincipalAmount(fund)
+      if (!principal) return 0
+      return (getHoldingProfitTotal(fund) / principal) * 100
+    }
+
+    const ensureProfitNavDates = (fundList = funds.value) => {
+      let changed = false
+      const newHoldings = { ...holdings.value }
+      fundList.forEach(fund => {
+        const h = newHoldings[fund.code]
+        const navDate = getDateText(fund?.jzrq)
+        if (h && h.share && navDate && !h.profit_nav_date) {
+          newHoldings[fund.code] = { ...h, profit_nav_date: navDate }
+          changed = true
+        }
+      })
+      if (changed) {
+        holdings.value = newHoldings
+        localStorage.setItem('realtime_holdings', JSON.stringify(newHoldings))
       }
-      return stored
+    }
+
+    const settleOfficialNavProfits = (fundList = funds.value) => {
+      let changed = false
+      const newHoldings = { ...holdings.value }
+      fundList.forEach(fund => {
+        const h = newHoldings[fund.code]
+        const navDate = getDateText(fund?.jzrq)
+        if (!h || !h.share || !navDate || hasFreshEstimate(fund)) return
+        if (h.profit_nav_date && h.profit_nav_date >= navDate) return
+
+        newHoldings[fund.code] = {
+          ...h,
+          profit: parseFloat(((h.profit ?? 0) + getHoldingProfitToday(fund)).toFixed(2)),
+          profit_nav_date: navDate
+        }
+        changed = true
+      })
+      if (changed) {
+        holdings.value = newHoldings
+        localStorage.setItem('realtime_holdings', JSON.stringify(newHoldings))
+      }
     }
 
     const getHoldingProfitTodayClass = (fund) => getValueClass(getHoldingProfitToday(fund))
@@ -794,6 +887,77 @@ export default {
       const n = parseFloat(nav)
       if (isNaN(a) || isNaN(n) || n <= 0) return 0
       return a / n
+    }
+
+    const formatMoney = (value) => {
+      const num = Number(value)
+      return Number.isFinite(num) ? num.toFixed(2) : '0.00'
+    }
+
+    const formatShare = (value) => {
+      const num = Number(value)
+      return Number.isFinite(num) ? num.toFixed(2) : '0.00'
+    }
+
+    const saveTradeRecords = () => {
+      localStorage.setItem('realtime_trade_records', JSON.stringify(tradeRecords.value))
+    }
+
+    const buildTradeRecord = (fund, type, inputValue, nav, tradeDate, status = 'settled', txnId = '') => {
+      const amount = type === 'buy' ? inputValue : inputValue * nav
+      const share = type === 'buy' ? inputValue / nav : inputValue
+      return {
+        id: txnId || genTxnId(),
+        txnId,
+        fundCode: fund.code,
+        fundName: fund.name || fund.code,
+        type,
+        tradeDate,
+        amount: Number.isFinite(amount) ? amount : 0,
+        share: Number.isFinite(share) ? share : 0,
+        nav,
+        status,
+        createdAt: new Date().toISOString(),
+        settledAt: status === 'settled' ? new Date().toISOString() : ''
+      }
+    }
+
+    const upsertTradeRecord = (record) => {
+      const idx = tradeRecords.value.findIndex(r => r.id === record.id || (record.txnId && r.txnId === record.txnId))
+      if (idx >= 0) {
+        const next = [...tradeRecords.value]
+        next[idx] = { ...next[idx], ...record }
+        tradeRecords.value = next
+      } else {
+        tradeRecords.value = [record, ...tradeRecords.value]
+      }
+      saveTradeRecords()
+    }
+
+    const removeTradeRecordByTxnId = (txnId) => {
+      tradeRecords.value = tradeRecords.value.filter(r => r.txnId !== txnId)
+      saveTradeRecords()
+    }
+
+    const getTradeStatusText = (status) => status === 'pending' ? '挂起' : '已更新'
+
+    const getLegacyPendingRecord = (txn, fund) => {
+      const nav = Number(txn.nav) || getFundNavByDate(fund, txn.tradeDate) || getCurrentPrice(fund)
+      return buildTradeRecord(fund, txn.type, Number(txn.inputValue) || 0, nav || 0, txn.tradeDate, 'pending', txn.id)
+    }
+
+    const getFundTradeRecords = (fund) => {
+      if (!fund?.code) return []
+      const records = tradeRecords.value.filter(r => r.fundCode === fund.code)
+      const recordedTxnIds = new Set(records.map(r => r.txnId).filter(Boolean))
+      const legacyPending = pendingTxns.value
+        .filter(txn => txn.fundCode === fund.code && !recordedTxnIds.has(txn.id))
+        .map(txn => getLegacyPendingRecord(txn, fund))
+      return [...records, ...legacyPending].sort((a, b) => {
+        const aTime = a.createdAt || a.tradeDate || ''
+        const bTime = b.createdAt || b.tradeDate || ''
+        return String(bTime).localeCompare(String(aTime))
+      })
     }
 
     const toggleCollapse = (code) => {
@@ -1282,6 +1446,7 @@ export default {
       refreshing.value = true
       
       try {
+        ensureProfitNavDates(funds.value)
         const updated = []
         for (const fund of funds.value) {
           try {
@@ -1295,6 +1460,7 @@ export default {
         
         funds.value = updated
         localStorage.setItem('realtime_funds', JSON.stringify(updated))
+        settleOfficialNavProfits(updated)
 
         // 检查挂起交易是否可以结算
         settlePendingTxnsIfReady()
@@ -1441,6 +1607,14 @@ export default {
       tradeForm.value = { type: 'buy', inputValue: '', tradeDate: todayDate.value }
     }
 
+    const openTradeHistory = (fund) => {
+      tradeHistoryModal.value = { open: true, fund }
+    }
+
+    const closeTradeHistory = () => {
+      tradeHistoryModal.value = { open: false, fund: null }
+    }
+
     const openTradeModal = (fund, type) => {
       openHoldingModal(fund)
       tradeForm.value.type = type
@@ -1452,12 +1626,12 @@ export default {
       // 已有持仓无 profit 字段时，取当前市场盈亏作为默认值，避免覆盖为 0
       let defaultProfit = 0
       if (h) {
-        defaultProfit = h.profit ?? ((currentNav - h.cost) * h.share)
+        defaultProfit = getHoldingProfitTotal(fund)
       }
       editForm.value = {
         fund,
-        // 持有金额 = 份额 × 持仓成本（不是估算市值）
-        amount: h ? (h.share * h.cost).toFixed(2) : '',
+        // 持有金额按最新公布净值计算，净值更新后会随份额同步调整。
+        amount: h ? getHoldingAmount(fund).toFixed(2) : '',
         profit: parseFloat(defaultProfit.toFixed(2))
       }
       showEditModal.value = true
@@ -1488,7 +1662,8 @@ export default {
         share,
         cost: nav,
         buy_date: fund.jzrq || todayDate.value,
-        profit: parseFloat(profit.toFixed(2))
+        profit: parseFloat(profit.toFixed(2)),
+        profit_nav_date: getDateText(fund.jzrq) || todayDate.value
       }
 
       holdings.value = newHoldings
@@ -1555,7 +1730,7 @@ export default {
     }
 
     // 结算一笔交易（直接更新持仓）
-    const settleTrade = (fund, type, inputValue, nav, tradeDate) => {
+    const settleTrade = (fund, type, inputValue, nav, tradeDate, options = {}) => {
       const newHoldings = { ...holdings.value }
       const h = newHoldings[fund.code] || { share: 0, cost: 0, buy_date: '' }
 
@@ -1569,7 +1744,8 @@ export default {
           share: newTotalShares,
           cost: newAvgCost,
           buy_date: h.buy_date || tradeDate || tradeForm.value.tradeDate,
-          profit: h.profit ?? 0
+          profit: h.profit ?? 0,
+          profit_nav_date: h.profit_nav_date || getDateText(fund.jzrq) || tradeDate || tradeForm.value.tradeDate
         }
       } else {
         // 卖出：inputValue 是份额
@@ -1581,13 +1757,22 @@ export default {
             share: newTotalShares,
             cost: h.cost,
             buy_date: h.buy_date,
-            profit: h.profit ?? 0
+            profit: h.profit ?? 0,
+            profit_nav_date: h.profit_nav_date || getDateText(fund.jzrq) || tradeDate || tradeForm.value.tradeDate
           }
         }
       }
 
       holdings.value = newHoldings
       localStorage.setItem('realtime_holdings', JSON.stringify(newHoldings))
+
+      if (options.record !== false) {
+        const record = buildTradeRecord(fund, type, inputValue, nav, tradeDate, 'settled', options.txnId || '')
+        if (options.txnId) {
+          record.id = options.txnId
+        }
+        upsertTradeRecord(record)
+      }
     }
 
     // 生成唯一 ID
@@ -1608,15 +1793,18 @@ export default {
       // 判断是否挂起
       if (isTradeDatePending(fund, tradeDate)) {
         // 挂起交易
+        const txnId = genTxnId()
         const txn = {
-          id: genTxnId(),
+          id: txnId,
           fundCode: fund.code,
           fundName: fund.name || fund.code,
           type,
           tradeDate,
           inputValue,
+          nav,
           createdAt: new Date().toISOString()
         }
+        upsertTradeRecord(buildTradeRecord(fund, type, inputValue, nav, tradeDate, 'pending', txnId))
         pendingTxns.value.push(txn)
         localStorage.setItem('realtime_pending_txns', JSON.stringify(pendingTxns.value))
         closeHoldingModal()
@@ -1632,6 +1820,7 @@ export default {
     const cancelPendingTxn = (txnId) => {
       pendingTxns.value = pendingTxns.value.filter(t => t.id !== txnId)
       localStorage.setItem('realtime_pending_txns', JSON.stringify(pendingTxns.value))
+      removeTradeRecordByTxnId(txnId)
     }
 
     // 检查并结算已就绪的挂起交易
@@ -1654,7 +1843,7 @@ export default {
         if (hasExactNavForDate(fund, txn.tradeDate)) {
           const nav = getFundNavByDate(fund, txn.tradeDate)
           if (nav > 0) {
-            settleTrade(fund, txn.type, txn.inputValue, nav, txn.tradeDate)
+            settleTrade(fund, txn.type, txn.inputValue, nav, txn.tradeDate, { txnId: txn.id })
             changed = true
             continue  // 已结算，不加入 remaining
           }
@@ -1689,6 +1878,7 @@ export default {
         funds: funds.value,
         holdings: holdings.value,
         pendingTxns: pendingTxns.value,
+        tradeRecords: tradeRecords.value,
         fundOrder: fundOrder.value,
         portfolioGroups: portfolioGroups.value,
         fundGroupMap: fundGroupMap.value,
@@ -1722,6 +1912,10 @@ export default {
         if (Array.isArray(parsed.pendingTxns)) {
           pendingTxns.value = parsed.pendingTxns
           localStorage.setItem('realtime_pending_txns', JSON.stringify(parsed.pendingTxns))
+        }
+        if (Array.isArray(parsed.tradeRecords)) {
+          tradeRecords.value = parsed.tradeRecords
+          localStorage.setItem('realtime_trade_records', JSON.stringify(parsed.tradeRecords))
         }
         if (Array.isArray(parsed.fundOrder)) {
           fundOrder.value = parsed.fundOrder
@@ -1786,6 +1980,12 @@ export default {
         if (Array.isArray(savedPending)) {
           pendingTxns.value = savedPending
         }
+        
+        const savedTradeRecords = JSON.parse(localStorage.getItem('realtime_trade_records') || '[]')
+        if (Array.isArray(savedTradeRecords)) {
+          tradeRecords.value = savedTradeRecords
+        }
+        ensureProfitNavDates(funds.value)
       } catch (e) {
         console.error('加载本地数据失败', e)
       }
@@ -1891,8 +2091,13 @@ export default {
       getHoldingEstimatedAmount,
       getHoldingProfitToday,
       getHoldingProfitTotal,
+      getHoldingReturnRate,
       getHoldingProfitTodayClass,
       getHoldingProfitTotalClass,
+      getFundTradeRecords,
+      getTradeStatusText,
+      formatMoney,
+      formatShare,
       getPriceStatusLabel,
       toggleCollapse,
       isSelected,
@@ -1916,6 +2121,9 @@ export default {
       removeFund,
       openHoldingModal,
       openTradeModal,
+      openTradeHistory,
+      closeTradeHistory,
+      tradeHistoryModal,
       openEditModal,
       closeEditModal,
       saveEdit,
@@ -2129,7 +2337,17 @@ export default {
 
 .c-holdings-area { background: #f8f9fc; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
 .c-h-head { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 13px; font-weight: bold; align-items: center;}
-.c-h-pen { color: #1677ff; font-weight: normal; margin-left: 8px; }
+.c-h-pen {
+  border: none;
+  background: transparent;
+  color: #1677ff;
+  font: inherit;
+  font-weight: 700;
+  margin-left: 8px;
+  padding: 0;
+  cursor: pointer;
+}
+.c-h-pen:hover { text-decoration: underline; text-underline-offset: 3px; }
 .btn-sm {
   border: none;
   padding: 6px 14px;
@@ -2195,6 +2413,52 @@ export default {
   max-width: calc(100vw - 32px);
   padding: 24px;
   border-radius: 14px;
+}
+.trade-history-modal {
+  width: 680px;
+}
+.trade-history-table {
+  overflow-x: auto;
+  border: 1px solid #edf0f5;
+  border-radius: 8px;
+}
+.trade-history-row {
+  min-width: 600px;
+  display: grid;
+  grid-template-columns: 72px 1.1fr 1fr 1fr 80px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #edf0f5;
+  font-size: 13px;
+}
+.trade-history-row:last-child { border-bottom: none; }
+.trade-history-head {
+  background: #f7f9fc;
+  color: #667085;
+  font-weight: 800;
+}
+.trade-type,
+.trade-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-width: 44px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-weight: 800;
+}
+.trade-type.buy { color: #f5222d; background: #fff1f0; }
+.trade-type.sell { color: #16a34a; background: #f0fdf4; }
+.trade-status.settled { color: #1677ff; background: #eef6ff; }
+.trade-status.pending { color: #b45309; background: #fff7ed; }
+.trade-history-empty {
+  padding: 28px 0;
+  text-align: center;
+  color: #98a2b3;
+  font-size: 14px;
 }
 .add-fund-modal {
   width: 520px;
