@@ -71,47 +71,22 @@
             <input type="checkbox" v-model="updateTasks.basic" />
             <span>
               <strong>更新基础数据</strong>
-              <em>拉取基金排行、收益、类型等筛选基础字段</em>
+              <em>从快照数据源批量拉取基金排行、收益、类型（500只/批），仅补缺失或超7天</em>
             </span>
           </label>
           <label class="task-item">
-            <input type="checkbox" v-model="updateTasks.rankings" />
+            <input type="checkbox" v-model="updateTasks.indicators" />
             <span>
-              <strong>计算同类排名</strong>
-              <em>刷新 4433 所需的同类排名百分位</em>
+              <strong>计算基金指标</strong>
+              <em>同类排名 · 风险指标（回撤/夏普/卡玛）· 板块表现汇总</em>
             </span>
           </label>
           <label class="task-item">
-            <input type="checkbox" v-model="updateTasks.risk" />
+            <input type="checkbox" v-model="updateTasks.market" />
             <span>
-              <strong>补充风险指标</strong>
-              <em>拉历史净值计算回撤、波动率、夏普、卡玛</em>
+              <strong>更新股市行情</strong>
+              <em>构建股票行业字典 · 根据重仓股刷新基金行业分类</em>
             </span>
-          </label>
-          <label class="task-item">
-            <input type="checkbox" v-model="updateTasks.industry" />
-            <span>
-              <strong>刷新基金所属板块</strong>
-              <em>先构建股票行业字典，再根据重仓股分类基金；缺口股票会补查接口</em>
-            </span>
-          </label>
-          <label class="task-item">
-            <input type="checkbox" v-model="updateTasks.industry_performance" />
-            <span>
-              <strong>汇总板块走势</strong>
-              <em>按基金所属板块聚合近3月、半年、1年、3年表现</em>
-            </span>
-          </label>
-        </div>
-
-        <div class="dialog-options">
-          <label>
-            <span>基础数据上限</span>
-            <input v-model.number="updateLimit" type="number" min="1" placeholder="留空为全部" />
-          </label>
-          <label>
-            <span>行业刷新上限</span>
-            <input v-model.number="industryLimit" type="number" min="1" placeholder="留空为全部" />
           </label>
         </div>
 
@@ -431,16 +406,11 @@ export default {
     })
     
     const selectedFundTypes = ref([])
-    const updateLimit = ref(null)
-    const updateMode = ref('sync_nav')
-    const industryLimit = ref(null)
     const showUpdateDialog = ref(false)
     const updateTasks = reactive({
       basic: true,
-      rankings: true,
-      risk: false,
-      industry: true,
-      industry_performance: true
+      indicators: true,
+      market: true
     })
     const hasSelectedUpdateTask = computed(() => Object.values(updateTasks).some(Boolean))
 
@@ -848,12 +818,13 @@ export default {
         }
         await screeningAPI.startUpdate({
           fund_types: selectedFundTypes.value,
-          limit: updateLimit.value || null,
-          mode: updateTasks.risk ? updateMode.value : 'sync_only',
-          industry_limit: industryLimit.value || null,
           build_industry_dictionary: buildIndustryDictionary,
           tasks: {
-            ...updateTasks
+            basic: updateTasks.basic,
+            rankings: updateTasks.indicators,
+            risk: updateTasks.indicators,
+            industry_performance: updateTasks.indicators,
+            industry: updateTasks.market
           }
         })
         // 开始轮询状态
@@ -1180,9 +1151,6 @@ export default {
       dbStatus,
       updateStatus,
       selectedFundTypes,
-      updateLimit,
-      updateMode,
-      industryLimit,
       showUpdateDialog,
       updateTasks,
       hasSelectedUpdateTask,

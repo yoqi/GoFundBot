@@ -160,6 +160,76 @@ def _is_us_stock_code(code):
         return False
     return bool(re.match(r'^[A-Z]{1,6}([.-][A-Z]{1,3})?$', text))
 
+# 常见交易所后缀 → 市场映射
+_EXCHANGE_SUFFIX_MAP = {
+    '.NS': ('印度', 'IN'),   # 印度国家交易所
+    '.BO': ('印度', 'IN'),   # 印度孟买交易所
+    '.T':  ('日本', 'JP'),   # 东京交易所
+    '.DE': ('德国', 'DE'),   # 德国 Xetra
+    '.PA': ('法国', 'FR'),   # 法国 Euronext
+    '.L':  ('英国', 'GB'),   # 伦敦交易所
+    '.HK': ('香港', 'HK'),   # 港交所（冗余保护）
+    '.MC': ('西班牙', 'ES'),  # 马德里
+    '.MI': ('意大利', 'IT'),  # 米兰
+    '.SW': ('瑞士', 'CH'),   # 瑞士
+    '.AS': ('荷兰', 'NL'),   # 阿姆斯特丹
+    '.BR': ('巴西', 'BR'),   # 巴西
+    '.TO': ('加拿大', 'CA'),  # 多伦多
+    '.V':  ('加拿大', 'CA'),  # 多伦多创业板
+    '.AX': ('澳大利亚', 'AU'), # 澳大利亚
+    '.KS': ('韩国', 'KR'),   # 韩国
+    '.TW': ('台湾', 'TW'),   # 台湾
+    '.SS': ('中国', 'CN'),   # 上海（A股）
+    '.SZ': ('中国', 'CN'),   # 深圳（A股）
+}
+
+def _detect_market_from_code(code):
+    """从股票代码后缀推断市场，返回 (市场中文名, 地区码) 或 None"""
+    text = str(code or '').strip().upper()
+    # 检查已知后缀
+    for suffix, (name, region) in _EXCHANGE_SUFFIX_MAP.items():
+        if text.endswith(suffix):
+            return (name, region)
+    # 纯字母、无后缀、不确定市场 → 不猜测，留给上层判断
+    return None
+
+def _market_hint_from_holdings(holdings, code):
+    """从原始持仓数据中提取股票的市场信息作为兜底"""
+    items = _portfolio_holding_items(holdings)
+    for item in items:
+        item_code = _normalize_stock_code(item.get('code', ''))
+        if item_code != code:
+            continue
+        # 优先用持仓数据自带的 market/region 字段
+        market = str(item.get('market') or item.get('region') or '').strip()
+        name = str(item.get('name') or '').strip()
+        # 常见中文市场名映射
+        MARKET_NAME_MAP = {
+            '印度': ('印度', 'IN'), '日本': ('日本', 'JP'),
+            '德国': ('德国', 'DE'), '法国': ('法国', 'FR'),
+            '英国': ('英国', 'GB'), '美国': ('美股', 'US'),
+            '美股': ('美股', 'US'), '港股': ('港股', 'HK'),
+            '香港': ('香港', 'HK'), '韩国': ('韩国', 'KR'),
+            '台湾': ('台湾', 'TW'), '越南': ('越南', 'VN'),
+            '新加坡': ('新加坡', 'SG'), '澳大利亚': ('澳洲', 'AU'),
+        }
+        for key, (industry, region) in MARKET_NAME_MAP.items():
+            if key in market or key in name:
+                return {'industry': industry, 'region': region,
+                        'name': name or code, 'source': 'holding_market_field'}
+        # 从股票名称末尾的交易所后缀推断
+        suffix_hint = _detect_market_from_code(name or item.get('original_code', code))
+        if suffix_hint:
+            return {'industry': suffix_hint[0], 'region': suffix_hint[1],
+                    'name': name or code, 'source': 'holding_name_suffix'}
+    # 从代码自身推断
+    hint = _detect_market_from_code(code)
+    if hint:
+        return {'industry': hint[0], 'region': hint[1],
+                'name': code, 'source': 'code_suffix_detect'}
+    return {'industry': '海外', 'region': 'WW',
+            'name': code, 'source': 'unknown_ticker'}
+
 def _is_a_share_stock_code(code):
     return bool(re.match(r'^\d{6}$', str(code or '').strip()))
 
@@ -446,14 +516,16 @@ def _resolve_stock_industries(db: Session, holdings, force_refresh=False, allow_
             continue
         if not _is_us_stock_code(code):
             continue
+        # 尝试从持仓数据中获取已知的市场信息
+        market_hint = _market_hint_from_holdings(holdings, code)
         record = db.query(StockIndustry).filter(StockIndustry.stock_code == code).first()
         if not record:
             record = StockIndustry(stock_code=code)
             db.add(record)
-        record.stock_name = record.stock_name or code
-        record.industry = '美股'
-        record.region = 'US'
-        record.source = 'rule.us_ticker'
+        record.stock_name = record.stock_name or market_hint.get('name') or code
+        record.industry = market_hint.get('industry') or '海外'
+        record.region = market_hint.get('region') or 'WW'
+        record.source = market_hint.get('source', 'rule.unknown_ticker')
         record.updated_time = datetime.now()
         industry_map[code] = _stock_industry_payload(record)
 
@@ -538,7 +610,13 @@ def _build_portfolio_industry_tag(portfolio: dict):
             or item.get('sector_name')
         )
         if not industry and _is_us_stock_code(item.get('code')):
-            industry = '美股'
+            # 不再直接假定为美股，优先用持仓自带的 industry，其次从代码后缀推断
+            item_industry = item.get('industry') or item.get('industry_name')
+            if item_industry and item_industry not in ('美股',):
+                industry = item_industry
+            else:
+                hint = _detect_market_from_code(item.get('code') or '')
+                industry = hint[0] if hint else '海外'
         if not industry and _is_hk_holding_item(item):
             industry = '港股'
         if not industry:
@@ -594,14 +672,19 @@ def _build_portfolio_industry_tag(portfolio: dict):
         else 0.0
     )
     count_share = top['count'] / valid_count * 100 if valid_count else 0.0
-    market_dominant = top['name'] in ('美股', '港股') and top['count'] >= 3
+    market_dominant = top['name'] in ('美股', '港股', '海外', '印度', '日本', '德国', '法国', '英国', '越南', '韩国') and top['count'] >= 3
+
+    # 如果投票结果是「海外」，尝试从基金名称中提取更精确的市场
+    result_name = top['name']
+    if result_name == '海外' and fallback_tag and fallback_tag.get('basis') == 'market_region':
+        result_name = fallback_tag['name']
 
     if top['count'] >= 4 or market_dominant:
         return {
-            'name': top['name'],
+            'name': result_name,
             'ratio': round(top['ratio'], 2),
             'count': top['count'],
-            'basis': 'market_region' if top['name'] in ('美股', '港股') else 'holding_count',
+            'basis': 'market_region' if top['name'] in ('美股', '港股', '海外', '印度', '日本', '德国', '法国', '英国', '越南', '韩国') else 'holding_count',
             'source': 'top_stock_holdings',
             'top_share': round(top_share, 2),
             'count_share': round(count_share, 2),
@@ -3138,6 +3221,9 @@ def _save_screening_snapshot_item(db, item, type_lookup):
 
     record = db.query(FundBasicInfo).filter(FundBasicInfo.fund_code == code).first()
     if record:
+        # 跳过 7 天内已更新的数据，不再全量覆写
+        if record.updated_time and (datetime.now() - record.updated_time) < timedelta(days=7):
+            return True  # 数据新鲜，跳过
         record.fund_name = fund_name
         record.fund_type = fund_type
         record.return_1y = item.get('return1y')

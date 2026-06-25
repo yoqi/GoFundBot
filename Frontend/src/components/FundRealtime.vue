@@ -190,7 +190,7 @@
               <div class="g-val">¥{{ getHoldingEstimatedAmount(fund).toFixed(2) }}</div>
             </div>
             <div class="grid-box">
-              <div class="g-label">持仓成本</div>
+              <div class="g-label">持仓金额</div>
               <div class="g-val">¥{{ getHoldingAmount(fund).toFixed(2) }}</div>
             </div>
             <div class="grid-box">
@@ -476,7 +476,7 @@ export default {
     const holdings = ref({})  // { code: { share, cost } }
     const collapsedCodes = ref(new Set())
     const refreshing = ref(false)
-    const refreshMs = ref(30000)
+    const refreshMs = ref(180000)
     const searchTerm = ref('')
     const searchResults = ref([])
     const selectedFunds = ref([])
@@ -1456,7 +1456,8 @@ export default {
       }
       editForm.value = {
         fund,
-        amount: h ? (h.share * currentNav).toFixed(2) : '',
+        // 持有金额 = 份额 × 持仓成本（不是估算市值）
+        amount: h ? (h.share * h.cost).toFixed(2) : '',
         profit: parseFloat(defaultProfit.toFixed(2))
       }
       showEditModal.value = true
@@ -1771,7 +1772,7 @@ export default {
           holdings.value = savedHoldings
         }
         
-        const savedMs = parseInt(localStorage.getItem('realtime_refresh_ms') || '30000', 10)
+        const savedMs = parseInt(localStorage.getItem('realtime_refresh_ms') || '180000', 10)
         if (Number.isFinite(savedMs) && savedMs >= 5000) {
           refreshMs.value = savedMs
         }

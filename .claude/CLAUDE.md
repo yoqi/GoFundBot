@@ -1,0 +1,1 @@
+powershell是GBK编码，代码是UTF-8，所以用直接用powershell看代码会有中文乱码
