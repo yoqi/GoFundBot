@@ -10,3 +10,5 @@ Backend/static/
 *.bak
 *.tmp
 Backend/Data
+.agents/
+.claude/

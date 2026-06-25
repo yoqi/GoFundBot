@@ -209,33 +209,96 @@
             </span>
           </div>
 
-          <div class="industry-filter-block" v-if="industryTags.length">
-            <span class="industry-filter-label">板块筛选</span>
-            <button
-              class="industry-chip"
-              :class="{ active: filters.industry_tags.length === 0 }"
-              @click="clearIndustryTags"
-            >
-              全部
-            </button>
-            <button
-              v-for="tag in industryTags"
-              :key="tag.name"
-              class="industry-chip"
-              :class="{ active: filters.industry_tags.includes(tag.name) }"
-              @click="toggleIndustryTag(tag.name)"
-            >
-              {{ tag.name }} <span>{{ tag.count }}</span>
-            </button>
-          </div>
-        </div>
+          <!-- ====== 标签筛选区 ====== -->
+        <div class="filter-section">
+          <div v-if="fundTypeGroups.length || sectorGroups.length" class="filter-tags-area">
 
-        <!-- 高级筛选 (可折叠) -->
-        <div class="advanced-toggle" @click="showAdvanced = !showAdvanced">
-          <span>⚙️ 高级筛选条件</span>
-          <span class="toggle-arrow">{{ showAdvanced ? '▲' : '▼' }}</span>
-        </div>
-        <div class="advanced-section" v-show="showAdvanced">
+            <!-- 基金大类区 -->
+            <div class="filter-zone" v-if="displayFundTypeGroups.length">
+              <div class="filter-zone-title">基金大类</div>
+              <div class="filter-zone-tags">
+                <div class="tag-primary-row">
+                  <button
+                    class="tag-chip"
+                    :class="{ active: filters.industry_tags.length === 0 }"
+                    @click="clearIndustryTags"
+                  >
+                    <span class="tag-chip-name">全部</span>
+                  </button>
+                  <button
+                    v-for="group in displayFundTypeGroups"
+                    :key="group.name"
+                    class="tag-chip tag-chip-primary"
+                    :class="{ active: isGroupActive(group), expanded: expandedGroups.has(group.name) }"
+                    @click="handlePrimaryIndustryClick(group)"
+                  >
+                    <span class="tag-chip-name">{{ group.name }}</span>
+                    <span class="tag-chip-count">{{ group.count }}只</span>
+                  </button>
+                </div>
+                <template v-for="group in displayFundTypeGroups" :key="'sub-' + group.name">
+                  <div v-if="expandedGroups.has(group.name) && group.tags.length" class="tag-sub-row">
+                    <button
+                      v-for="tag in group.tags"
+                      :key="tag.name"
+                      class="tag-chip tag-chip-sub"
+                      :class="{ active: filters.industry_tags.includes(tag.name) }"
+                      @click="toggleIndustryTag(tag.name)"
+                    >
+                      <span class="tag-chip-name">{{ tag.name }}</span>
+                      <span class="tag-chip-count">{{ tag.count }}</span>
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- 行业/市场板块区 -->
+            <div class="filter-zone" v-if="displaySectorGroups.length">
+              <div class="filter-zone-title">
+                行业 / 市场板块
+                <button class="zone-expand-btn" @click="sectorExpanded = !sectorExpanded">
+                  {{ sectorExpanded ? '收起 ▲' : '展开全部 ▼' }}
+                </button>
+              </div>
+              <div class="filter-zone-tags">
+                <div class="tag-primary-row">
+                  <button
+                    v-for="group in visibleSectorGroups"
+                    :key="group.name"
+                    class="tag-chip tag-chip-primary"
+                    :class="{ active: isGroupActive(group), expanded: expandedGroups.has(group.name) }"
+                    @click="handlePrimaryIndustryClick(group)"
+                  >
+                    <span class="tag-chip-name">{{ group.name }}</span>
+                    <span class="tag-chip-count">{{ group.count }}只</span>
+                  </button>
+                </div>
+                <template v-for="group in visibleSectorGroups" :key="'sub-' + group.name">
+                  <div v-if="expandedGroups.has(group.name) && group.tags.length" class="tag-sub-row">
+                    <button
+                      v-for="tag in group.tags"
+                      :key="tag.name"
+                      class="tag-chip tag-chip-sub"
+                      :class="{ active: filters.industry_tags.includes(tag.name) }"
+                      @click="toggleIndustryTag(tag.name)"
+                    >
+                      <span class="tag-chip-name">{{ tag.name }}</span>
+                      <span class="tag-chip-count">{{ tag.count }}</span>
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+        <!-- 高级筛选 -->
+        <div class="advanced-section-wrapper">
+          <div class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+            <span>⚙️ 高级筛选条件</span>
+            <span class="toggle-arrow">{{ showAdvanced ? '▲' : '▼' }}</span>
+          </div>
+          <div class="advanced-section" v-show="showAdvanced">
           <div class="adv-grid-simple">
             <!-- 收益率 -->
             <div class="adv-item">
@@ -280,6 +343,9 @@
           </div>
         </div>
       </div>
+    </div>
+    </div>
+    </div>
     </div>
 
     <!-- 筛选结果 -->
@@ -610,8 +676,142 @@ export default {
     const quickTypeFilter = ref('')
     const availableTypes = ref([])  // 从后端获取可选类型
     const activeQuickDropdown = ref(null)  // 当前打开的下拉菜单
-    const industryTags = ref([])
+    // 标签分组：基金大类 + 行业/市场板块
+    const fundTypeGroups = ref([])   // {name, tags, count}[]
+    const sectorGroups = ref([])     // {name, tags, count}[]
+    const ungroupedTags = ref([])    // 未归类的二级标签
+    const expandedGroups = ref(new Set())
+    const sectorExpanded = ref(true)  // 行业板块是否展开全部
     const screeningGridRef = ref(null)
+
+    const fallbackSectorBuckets = [
+      { name: '全球市场', patterns: ['全球', '海外', '港股', '美股', '日本', '印度', '越南', '德国', '法国', '英国', '韩国', '东南亚', '新兴市场', '纳斯达克', '标普', '恒生', '中概'] },
+      { name: '科技制造', patterns: ['科技', '半导体', '芯片', '电子', '计算机', '通信', '人工智能', '软件', '互联网', '传媒', '游戏', '新能源车', '汽车', '机器人', '高端制造', '军工', '机械', '电力设备'] },
+      { name: '消费医药', patterns: ['消费', '食品', '饮料', '白酒', '家电', '农业', '养殖', '医药', '医疗', '生物', '创新药', '中药', '养老'] },
+      { name: '周期资源', patterns: ['煤炭', '钢铁', '有色', '金属', '黄金', '石油', '化工', '资源', '能源', '电力', '环保', '建筑', '建材', '交运', '航运'] },
+      { name: '金融地产', patterns: ['银行', '证券', '保险', '金融', '地产', '房地产', '非银'] },
+      { name: '固收与策略', patterns: ['债券', '纯债', '短债', '可转债', '货币', '红利', '量化', '价值', '成长', '低波', '策略'] },
+    ]
+
+    const getFallbackSectorName = (tagName) => {
+      const text = String(tagName || '')
+      const bucket = fallbackSectorBuckets.find(item =>
+        item.patterns.some(pattern => text.includes(pattern))
+      )
+      return bucket ? bucket.name : '其他主题'
+    }
+
+    const isBroadIndexTag = (tagName) => {
+      const text = String(tagName || '')
+      const patterns = ['沪深300', '中证500', '上证50', '创业板', '科创50', '中证1000', '中证2000', '宽基', '指数', '联接']
+      return patterns.some(pattern => text.includes(pattern))
+    }
+
+    const normalizeIndustryGroup = (group) => {
+      const groupName = group.name || '其他主题'
+      const rawTags = Array.isArray(group.tags) ? group.tags : []
+      const childTags = rawTags
+        .filter(tag => tag && tag.name && tag.name !== groupName)
+        .sort((a, b) => (b.count || 0) - (a.count || 0))
+      return {
+        name: groupName,
+        count: group.count || childTags.reduce((sum, tag) => sum + (tag.count || 0), 0),
+        tags: childTags,
+      }
+    }
+
+    const displaySectorGroups = computed(() => {
+      const grouped = new Map()
+      const addGroup = (group) => {
+        const normalized = normalizeIndustryGroup(group)
+        const existing = grouped.get(normalized.name)
+        if (existing) {
+          existing.count += normalized.count
+          existing.tags.push(...normalized.tags)
+        } else {
+          grouped.set(normalized.name, normalized)
+        }
+      }
+
+      sectorGroups.value.forEach(addGroup)
+
+      ungroupedTags.value.forEach(tag => {
+        if (isBroadIndexTag(tag.name)) return
+        const groupName = getFallbackSectorName(tag.name)
+        if (!grouped.has(groupName)) {
+          grouped.set(groupName, { name: groupName, count: 0, tags: [] })
+        }
+        const group = grouped.get(groupName)
+        group.count += tag.count || 0
+        group.tags.push(tag)
+      })
+
+      return Array.from(grouped.values())
+        .map(group => ({
+          ...group,
+          tags: group.tags
+            .filter((tag, index, arr) => arr.findIndex(item => item.name === tag.name) === index)
+            .sort((a, b) => (b.count || 0) - (a.count || 0))
+        }))
+        .sort((a, b) => (b.count || 0) - (a.count || 0))
+    })
+
+    const displayFundTypeGroups = computed(() => {
+      const groups = fundTypeGroups.value.map(group => ({
+        ...group,
+        tags: [...(group.tags || [])],
+      }))
+      const indexTags = ungroupedTags.value.filter(tag => isBroadIndexTag(tag.name))
+      if (indexTags.length) {
+        let indexGroup = groups.find(group => group.name === '宽基指数')
+        if (!indexGroup) {
+          indexGroup = { name: '宽基指数', count: 0, tags: [] }
+          groups.push(indexGroup)
+        }
+        indexGroup.tags.push(...indexTags)
+        indexGroup.tags = indexGroup.tags
+          .filter((tag, index, arr) => arr.findIndex(item => item.name === tag.name) === index)
+          .sort((a, b) => (b.count || 0) - (a.count || 0))
+        indexGroup.count = indexGroup.tags.reduce((sum, tag) => sum + (tag.count || 0), 0)
+      }
+      return groups.sort((a, b) => (b.count || 0) - (a.count || 0))
+    })
+
+    const toggleGroup = (name) => {
+      const s = new Set(expandedGroups.value)
+      if (s.has(name)) s.delete(name)
+      else s.add(name)
+      expandedGroups.value = s
+    }
+
+    const handlePrimaryIndustryClick = (group) => {
+      if (group.tags.length) {
+        toggleGroup(group.name)
+      }
+    }
+
+    const isGroupActive = (group) => {
+      return expandedGroups.value.has(group.name) ||
+        group.tags.some(tag => filters.industry_tags.includes(tag.name))
+    }
+
+    // 展平所有可筛选的二级标签
+    const allSelectableTags = computed(() => {
+      const result = []
+      for (const g of displayFundTypeGroups.value) {
+        for (const t of g.tags) result.push(t)
+      }
+      for (const g of displaySectorGroups.value) {
+        for (const t of g.tags) result.push(t)
+      }
+      return result
+    })
+
+    // 行业板块默认只展示前 N 个组
+    const visibleSectorGroups = computed(() => {
+      if (sectorExpanded.value) return displaySectorGroups.value
+      return displaySectorGroups.value.slice(0, 8)
+    })
     
     // 快速筛选的多级分类配置
     const quickTypeCategories = [
@@ -917,10 +1117,15 @@ export default {
     const fetchIndustryTags = async () => {
       try {
         const res = await screeningAPI.getIndustryTags()
-        industryTags.value = res.data.data || []
+        const data = res.data || {}
+        fundTypeGroups.value = data.fundTypeGroups || []
+        sectorGroups.value = data.sectorGroups || []
+        ungroupedTags.value = data.ungrouped || []
       } catch (err) {
         console.error('加载板块标签失败:', err)
-        industryTags.value = []
+        fundTypeGroups.value = []
+        sectorGroups.value = []
+        ungroupedTags.value = []
       }
     }
 
@@ -1158,7 +1363,17 @@ export default {
       resolveIndustryDict,
       askIndustryDictionary,
       filters,
-      industryTags,
+      fundTypeGroups,
+      displayFundTypeGroups,
+      sectorGroups,
+      ungroupedTags,
+      expandedGroups,
+      sectorExpanded,
+      displaySectorGroups,
+      visibleSectorGroups,
+      toggleGroup,
+      handlePrimaryIndustryClick,
+      isGroupActive,
       screeningGridRef,
       gridOptions,
       sortConfig,
@@ -2245,50 +2460,154 @@ export default {
   border-color: #1677ff;
 }
 
-.industry-filter-block {
+/* ====== 标签筛选区 ====== */
+.filter-tags-area {
+  margin-top: 6px;
+}
+
+/* 分区容器 */
+.filter-zone {
+  margin-bottom: 8px;
+}
+
+/* 分区标题 */
+.filter-zone-title {
+  font-size: 14px;
+  color: #374151;
+  font-weight: 700;
+  margin-bottom: 8px;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
 }
 
-.industry-filter-label {
-  color: #666;
-  font-size: 12px;
-  font-weight: 600;
+/* 展开/收起按钮 */
+.zone-expand-btn {
+  font-size: 11px;
+  color: #1677ff;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.zone-expand-btn:hover {
+  text-decoration: underline;
 }
 
-.industry-chip {
-  border: 1px solid #d9e3f0;
-  border-radius: 999px;
-  background: #fff;
+/* 标签流式容器 */
+.filter-zone-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.tag-primary-row {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 标签芯片 */
+.tag-chip {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 100px;
+  max-width: 160px;
+  padding: 6px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
   color: #4b5563;
   cursor: pointer;
-  font-size: 12px;
-  padding: 4px 10px;
-  transition: all 0.2s;
+  font-size: 13px;
+  transition: all 0.15s;
+  text-align: center;
 }
 
-.industry-chip span {
-  margin-left: 4px;
-  color: #9ca3af;
+.tag-chip-primary {
+  min-width: 112px;
+  max-width: 180px;
+  height: 34px;
+  padding: 0 12px;
+  border-color: #dbe3ef;
+  background: #fff;
 }
 
-.industry-chip:hover,
-.industry-chip.active {
+.tag-chip-primary.expanded {
   border-color: #1677ff;
-  background: #f0f5ff;
-  color: #1677ff;
+  background: #f0f6ff;
+  color: #0f5fc7;
 }
 
-/* Advanced toggle */
+.tag-chip:hover {
+  background: #f0f0f0;
+  border-color: #d1d5db;
+}
+
+.tag-chip.active {
+  background: #1677ff;
+  border-color: #1677ff;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(22,119,255,0.25);
+}
+
+.tag-chip.active .tag-chip-count {
+  color: rgba(255,255,255,0.7);
+}
+
+/* 标签文字 */
+.tag-chip-name {
+  font-weight: 500;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 标签数字 */
+.tag-chip-count {
+  font-size: 10px;
+  color: #9ca3af;
+  line-height: 1.3;
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.tag-sub-row {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 6px 10px;
+  padding: 6px 0 2px 10px;
+  border-left: 2px solid #e6f0ff;
+}
+
+/* 二级子标签 */
+.tag-chip-sub {
+  min-width: 80px;
+  max-width: 140px;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+/* 高级筛选区 */
+.advanced-section-wrapper {
+  margin-top: 16px;
+}
+
 .advanced-toggle {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 10px 14px;
-  margin-top: 12px;
   font-size: 13px;
   font-weight: 600;
   color: #555;
