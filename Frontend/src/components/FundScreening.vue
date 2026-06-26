@@ -837,12 +837,19 @@ export default {
     const handlePrimaryIndustryClick = (group) => {
       if (group.tags.length) {
         toggleGroup(group.name)
+      } else {
+        // 没有二级行业的，直接用一级行业名称筛选
+        toggleIndustryTag(group.name)
       }
     }
 
     const isGroupActive = (group) => {
-      return expandedGroups.value.has(group.name) ||
-        group.tags.some(tag => filters.industry_tags.includes(tag.name))
+      if (expandedGroups.value.has(group.name)) return true
+      if (group.tags.length) {
+        return group.tags.some(tag => filters.industry_tags.includes(tag.name))
+      }
+      // 无二级行业的，检查一级行业名是否被直接选中
+      return filters.industry_tags.includes(group.name)
     }
 
     // 展平所有可筛选的二级标签
