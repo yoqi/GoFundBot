@@ -2360,6 +2360,26 @@ def _estimate_is_after_nav(estimate_time, nav_date):
     return bool(estimate_date and official_date and estimate_date > official_date)
 
 
+def _apply_estimate_fields(rec, name, net_worth, net_worth_date,
+                          estimate_value, estimate_change, estimate_time):
+    """将字段应用到已有的 FundEstimate 记录（仅覆盖非 None 值）"""
+    if name is not None:
+        rec.name = name
+    if net_worth_date is not None and (
+        not rec.net_worth_date
+        or _normalize_date(net_worth_date) >= _normalize_date(rec.net_worth_date)
+    ):
+        if net_worth is not None:
+            rec.net_worth = net_worth
+        rec.net_worth_date = net_worth_date
+    if estimate_value is not None:
+        rec.estimate_value = estimate_value
+    if estimate_change is not None:
+        rec.estimate_change = estimate_change
+    if estimate_time is not None:
+        rec.estimate_time = estimate_time
+
+
 def _upsert_fund_estimate(
     db,
     fund_code,
@@ -2375,24 +2395,9 @@ def _upsert_fund_estimate(
     ).first()
 
     if estimate_record:
-        if name is not None:
-            estimate_record.name = name
-        # 只有净值日期更新时才覆盖（防止 CDN 返回旧数据覆盖新数据）
-        # 使用 _normalize_date 确保日期比较不受零填充差异影响
-        if net_worth_date is not None and (
-            not estimate_record.net_worth_date
-            or _normalize_date(net_worth_date) >= _normalize_date(estimate_record.net_worth_date)
-        ):
-            if net_worth is not None:
-                estimate_record.net_worth = net_worth
-            estimate_record.net_worth_date = net_worth_date
-        # 保护估值字段：仅在提供新值时覆盖，防止 None 擦除已有缓存
-        if estimate_value is not None:
-            estimate_record.estimate_value = estimate_value
-        if estimate_change is not None:
-            estimate_record.estimate_change = estimate_change
-        if estimate_time is not None:
-            estimate_record.estimate_time = estimate_time
+        # 更新已有记录
+        _apply_estimate_fields(estimate_record, name, net_worth, net_worth_date,
+                               estimate_value, estimate_change, estimate_time)
     else:
         estimate_record = FundEstimate(
             fund_code=fund_code,
@@ -2404,6 +2409,21 @@ def _upsert_fund_estimate(
             estimate_time=estimate_time
         )
         db.add(estimate_record)
+        try:
+            db.flush()
+        except Exception:
+            # 并发竞态：另一个请求先插入了同一 fund_code
+            db.rollback()
+            existing = db.query(FundEstimate).filter(
+                FundEstimate.fund_code == fund_code
+            ).first()
+            if existing:
+                _apply_estimate_fields(existing, name, net_worth, net_worth_date,
+                                       estimate_value, estimate_change, estimate_time)
+                estimate_record = existing
+            else:
+                # 极罕见情况，直接重新 add
+                db.add(estimate_record)
 
     return {
         'fund_code': fund_code,
@@ -5373,6 +5393,18 @@ def query_screening_funds():
     if filters.get('return_1y_max') is not None:
         query = query.filter(FundBasicInfo.return_1y <= filters['return_1y_max'])
 
+    extra_return_filter_map = {
+        'return_1m': cast(func.json_extract(FundBasicInfo.performance_json, '$.1_month_return'), Float),
+        'return_3m': cast(func.json_extract(FundBasicInfo.performance_json, '$.3_month_return'), Float),
+        'return_6m': cast(func.json_extract(FundBasicInfo.performance_json, '$.6_month_return'), Float),
+        'return_3y': cast(func.json_extract(FundBasicInfo.performance_json, '$.3_year_return'), Float),
+    }
+    for key, column in extra_return_filter_map.items():
+        if filters.get(f'{key}_min') is not None:
+            query = query.filter(column >= filters[f'{key}_min'])
+        if filters.get(f'{key}_max') is not None:
+            query = query.filter(column <= filters[f'{key}_max'])
+
     # 快速类型筛选（精确匹配）
     if filters.get('quick_fund_type'):
         query = query.filter(FundBasicInfo.fund_type == filters['quick_fund_type'])
@@ -5389,12 +5421,57 @@ def query_screening_funds():
     
     if filters.get('calmar_min') is not None:
         query = query.filter(FundRiskMetrics.calmar_ratio_1y >= filters['calmar_min'])
+
+    risk_max_filter_map = {
+        'max_drawdown_3m': FundRiskMetrics.max_drawdown_3m,
+        'max_drawdown_6m': FundRiskMetrics.max_drawdown_6m,
+        'max_drawdown_1y': FundRiskMetrics.max_drawdown_1y,
+        'max_drawdown_3y': FundRiskMetrics.max_drawdown_3y,
+        'max_drawdown_all': FundRiskMetrics.max_drawdown_all,
+        'volatility_1y': FundRiskMetrics.volatility_1y,
+        'volatility_3y': FundRiskMetrics.volatility_3y,
+    }
+    risk_min_filter_map = {
+        'sharpe_ratio_1y': FundRiskMetrics.sharpe_ratio_1y,
+        'sharpe_ratio_3y': FundRiskMetrics.sharpe_ratio_3y,
+        'calmar_ratio_1y': FundRiskMetrics.calmar_ratio_1y,
+        'calmar_ratio_3y': FundRiskMetrics.calmar_ratio_3y,
+    }
+    risk_range_filter_map = {
+        'annual_return_1y': FundRiskMetrics.annual_return_1y,
+        'annual_return_3y': FundRiskMetrics.annual_return_3y,
+    }
+    for key, column in risk_max_filter_map.items():
+        if filters.get(f'{key}_max') is not None:
+            query = query.filter(column <= filters[f'{key}_max'])
+    for key, column in risk_min_filter_map.items():
+        if filters.get(f'{key}_min') is not None:
+            query = query.filter(column >= filters[f'{key}_min'])
+    for key, column in risk_range_filter_map.items():
+        if filters.get(f'{key}_min') is not None:
+            query = query.filter(column >= filters[f'{key}_min'])
+        if filters.get(f'{key}_max') is not None:
+            query = query.filter(column <= filters[f'{key}_max'])
     
     # 排名筛选
     if filters.get('rank_1y_max') is not None:
         query = query.filter(FundScreeningRank.rank_pct_1y <= filters['rank_1y_max'])
     if filters.get('rank_3m_max') is not None:
         query = query.filter(FundScreeningRank.rank_pct_3m <= filters['rank_3m_max'])
+
+    rank_filter_map = {
+        'rank_pct_1m': FundScreeningRank.rank_pct_1m,
+        'rank_pct_3m': FundScreeningRank.rank_pct_3m,
+        'rank_pct_6m': FundScreeningRank.rank_pct_6m,
+        'rank_pct_1y': FundScreeningRank.rank_pct_1y,
+        'rank_pct_2y': FundScreeningRank.rank_pct_2y,
+        'rank_pct_3y': FundScreeningRank.rank_pct_3y,
+    }
+    for key, column in rank_filter_map.items():
+        if filters.get(f'{key}_max') is not None:
+            query = query.filter(column <= filters[f'{key}_max'])
+    if filters.get('pass_4433') is True:
+        query = query.filter(FundScreeningRank.pass_4433 == 1)
     
     # 排序（根据排序字段选择对应的表）
     sort_map = {
@@ -5402,12 +5479,26 @@ def query_screening_funds():
         'sharpe_ratio_3y': FundRiskMetrics.sharpe_ratio_3y,
         'return_1m': cast(func.json_extract(FundBasicInfo.performance_json, '$.1_month_return'), Float),
         'return_3m': cast(func.json_extract(FundBasicInfo.performance_json, '$.3_month_return'), Float),
+        'return_6m': cast(func.json_extract(FundBasicInfo.performance_json, '$.6_month_return'), Float),
         'return_1y': FundBasicInfo.return_1y,
+        'return_3y': cast(func.json_extract(FundBasicInfo.performance_json, '$.3_year_return'), Float),
         'volatility_1y': FundRiskMetrics.volatility_1y,
+        'volatility_3y': FundRiskMetrics.volatility_3y,
         'max_drawdown_1y': FundRiskMetrics.max_drawdown_1y,
+        'max_drawdown_3m': FundRiskMetrics.max_drawdown_3m,
+        'max_drawdown_6m': FundRiskMetrics.max_drawdown_6m,
+        'max_drawdown_3y': FundRiskMetrics.max_drawdown_3y,
+        'max_drawdown_all': FundRiskMetrics.max_drawdown_all,
         'calmar_ratio_1y': FundRiskMetrics.calmar_ratio_1y,
+        'calmar_ratio_3y': FundRiskMetrics.calmar_ratio_3y,
+        'annual_return_1y': FundRiskMetrics.annual_return_1y,
+        'annual_return_3y': FundRiskMetrics.annual_return_3y,
         'rank_pct_1y': FundScreeningRank.rank_pct_1y,
+        'rank_pct_1m': FundScreeningRank.rank_pct_1m,
         'rank_pct_3m': FundScreeningRank.rank_pct_3m,
+        'rank_pct_6m': FundScreeningRank.rank_pct_6m,
+        'rank_pct_2y': FundScreeningRank.rank_pct_2y,
+        'rank_pct_3y': FundScreeningRank.rank_pct_3y,
         'fund_code': FundBasicInfo.fund_code,
         'fund_name': FundBasicInfo.fund_name,
         'fund_type': FundBasicInfo.fund_type,
@@ -5459,19 +5550,26 @@ def query_screening_funds():
             'return_1y': perf.get('1_year_return') if perf.get('1_year_return') not in ['0.00', 0.0, 0, ''] else None,
             'return_3y': perf.get('3_year_return') if perf.get('3_year_return') not in ['0.00', 0.0, 0, ''] else None,
             # 风险指标（来自 FundRiskMetrics），如果脏数据则隐藏
+            'max_drawdown_3m': (risk.max_drawdown_3m if risk else None) if not is_dirty_risk else None,
+            'max_drawdown_6m': (risk.max_drawdown_6m if risk else None) if not is_dirty_risk else None,
             'max_drawdown_1y': (risk.max_drawdown_1y if risk else None) if not is_dirty_risk else None,
             'max_drawdown_3y': (risk.max_drawdown_3y if risk else None) if not is_dirty_risk else None,
+            'max_drawdown_all': (risk.max_drawdown_all if risk else None) if not is_dirty_risk else None,
             'volatility_1y': (risk.volatility_1y if risk else None) if not is_dirty_risk else None,
             'volatility_3y': (risk.volatility_3y if risk else None) if not is_dirty_risk else None,
             'sharpe_ratio_1y': (risk.sharpe_ratio_1y if risk else None) if not is_dirty_risk else None,
             'sharpe_ratio_3y': (risk.sharpe_ratio_3y if risk else None) if not is_dirty_risk else None,
             'calmar_ratio_1y': (risk.calmar_ratio_1y if risk else None) if not is_dirty_risk else None,
             'calmar_ratio_3y': (risk.calmar_ratio_3y if risk else None) if not is_dirty_risk else None,
+            'annual_return_1y': (risk.annual_return_1y if risk else None) if not is_dirty_risk else None,
+            'annual_return_3y': (risk.annual_return_3y if risk else None) if not is_dirty_risk else None,
             # 排名数据（来自 FundScreeningRank）
             'rank_pct_1m': rank.rank_pct_1m if rank else None,
             'rank_pct_3m': rank.rank_pct_3m if rank else None,
             'rank_pct_6m': rank.rank_pct_6m if rank else None,
             'rank_pct_1y': rank.rank_pct_1y if rank else None,
+            'rank_pct_2y': rank.rank_pct_2y if rank else None,
+            'rank_pct_3y': rank.rank_pct_3y if rank else None,
             'pass_4433': (rank.pass_4433 == 1) if rank else False,
             'industry_tag': ({
                 'name': industry_tag.industry_tag,
