@@ -275,6 +275,10 @@ def _strategy_fixed_amount(index, point, state, trades, signals, fee_rate, param
 
 
 def _strategy_double_down(index, point, state, trades, signals, fee_rate, params, ctx):
+    if "annual_plan_capital" in params:
+        _strategy_double_down_plan(index, point, state, trades, signals, fee_rate, params, ctx)
+        return
+
     base_amount = _num(params, "base_amount", _num(params, "amount", 1000))
     trigger_percent = _num(params, "drop_trigger_percent", 3)
     multiplier = max(_num(params, "multiplier", 2), 1)
@@ -301,6 +305,188 @@ def _strategy_double_down(index, point, state, trades, signals, fee_rate, params
         reason = "常规定投"
     if _buy(point.date, point.nav, amount, state, trades, signals, fee_rate, reason):
         ctx["last_buy_nav"] = point.nav
+
+
+def _strategy_double_down_plan(index, point, state, trades, signals, fee_rate, params, ctx):
+    fee_rate = 0
+    annual_capital = max(_num(params, "annual_plan_capital", 12000), 0)
+    min_interval_days = max(int(_num(params, "min_trade_interval_days", 12)), 6)
+    future_years = max(int(_num(params, "future_years", 2)), 0)
+    multiplier = max(_num(params, "multiplier", 2), 1)
+    max_multiplier = max(_num(params, "max_multiplier", 2), 1)
+    drop_step_percent = max(_num(params, "drop_step_percent", 5), 0.1)
+    opportunity_drawdown_percent = max(_num(params, "opportunity_drawdown_percent", 12), 0)
+    initial_low_band_percent = max(_num(params, "initial_low_band_percent", 8), 0)
+    lot_take_profit_percent = max(_num(params, "lot_take_profit_percent", 10), 0)
+    restart_drop_percent = max(_num(params, "restart_after_sell_drop_percent", 3), 0)
+    sell_drawdown_percent = max(_num(params, "sell_drawdown_percent", 0), 0)
+    dynamic_drawdown = bool(params.get("dynamic_drawdown"))
+    target_type = params.get("target_type") or "double"
+    target_percent = _num(params, "target_percent", 20)
+
+    start_date = ctx.setdefault("double_plan_start_date", point.date)
+    start_nav = ctx.setdefault("double_plan_start_nav", point.nav)
+    ctx["double_plan_seen_peak_nav"] = max(ctx.get("double_plan_seen_peak_nav") or point.nav, point.nav)
+    base_amount = annual_capital / 12 if annual_capital > 0 else 0
+    ctx.setdefault("double_plan_lots", [])
+
+    if state["shares"] > 0:
+        target_hit, target_metric = _double_plan_target_status(point, state, ctx, target_type, target_percent)
+        if target_hit:
+            ctx["double_plan_target_reached"] = True
+            ctx["double_plan_peak_nav"] = max(ctx.get("double_plan_peak_nav") or point.nav, point.nav)
+            ctx["double_plan_peak_metric"] = max(ctx.get("double_plan_peak_metric") or target_metric, target_metric)
+
+        if ctx.get("double_plan_target_reached") and sell_drawdown_percent <= 0:
+            _sell(point.date, point.nav, state["shares"], state, trades, signals, fee_rate, "目标达成，立即止盈")
+            ctx["double_plan_lots"] = []
+            state["invested"] = 0
+            ctx["double_plan_target_reached"] = False
+            ctx["double_plan_peak_nav"] = None
+            ctx["double_plan_peak_metric"] = None
+            ctx["double_plan_pause_buy_nav"] = None
+            return
+
+        peak_nav = ctx.get("double_plan_peak_nav")
+        if ctx.get("double_plan_target_reached") and peak_nav:
+            effective_drawdown = sell_drawdown_percent
+            if dynamic_drawdown:
+                peak_metric = ctx.get("double_plan_peak_metric") or target_metric
+                effective_drawdown += max(0, peak_metric - _double_plan_target_value(target_type, target_percent)) * 0.25
+            fallback = (peak_nav - point.nav) / peak_nav * 100 if peak_nav > 0 else 0
+            if fallback >= effective_drawdown and target_hit:
+                reason = f"目标达成后回落{round(fallback, 2)}%，止盈卖出"
+                _sell(point.date, point.nav, state["shares"], state, trades, signals, fee_rate, reason)
+                ctx["double_plan_lots"] = []
+                state["invested"] = 0
+                ctx["double_plan_target_reached"] = False
+                ctx["double_plan_peak_nav"] = None
+                ctx["double_plan_peak_metric"] = None
+                ctx["double_plan_pause_buy_nav"] = None
+                return
+
+        pause_nav = ctx.get("double_plan_pause_buy_nav")
+        if pause_nav:
+            if point.nav <= pause_nav * (1 - restart_drop_percent / 100):
+                ctx["double_plan_pause_buy_nav"] = None
+            else:
+                return
+
+        lots = ctx.get("double_plan_lots") or []
+        last_lot = lots[-1] if lots else None
+        if last_lot and lot_take_profit_percent > 0:
+            days_since_lot_buy = (datetime.strptime(point.date, "%Y-%m-%d") - datetime.strptime(last_lot["date"], "%Y-%m-%d")).days
+            lot_return = (point.nav - last_lot["nav"]) / last_lot["nav"] * 100 if last_lot["nav"] > 0 else 0
+            if days_since_lot_buy >= min_interval_days and lot_return >= lot_take_profit_percent:
+                if _double_plan_sell_lot(point, state, trades, signals, fee_rate, last_lot, "牛市卖出"):
+                    lots.pop()
+                    ctx["double_plan_pause_buy_nav"] = point.nav
+                    ctx["double_plan_last_buy_date"] = point.date
+                    return
+
+    last_trade_date = ctx.get("double_plan_last_buy_date")
+    if last_trade_date:
+        days_since = (datetime.strptime(point.date, "%Y-%m-%d") - datetime.strptime(last_trade_date, "%Y-%m-%d")).days
+        if days_since < min_interval_days:
+            return
+
+    if base_amount <= 0:
+        return
+
+    elapsed_years = _elapsed_plan_years(start_date, point.date)
+    available_budget = annual_capital * (elapsed_years + future_years)
+    remaining_budget = max(available_budget - state["invested"], 0)
+    if remaining_budget <= 0:
+        return
+
+    avg_cost_nav = _double_plan_average_cost_nav(ctx, state, point.nav)
+    drop = (avg_cost_nav - point.nav) / avg_cost_nav * 100 if avg_cost_nav > 0 else 0
+    seen_peak_nav = ctx.get("double_plan_seen_peak_nav") or point.nav
+    peak_drawdown = (seen_peak_nav - point.nav) / seen_peak_nav * 100 if seen_peak_nav > 0 else 0
+
+    has_position = state["shares"] > 0
+    in_initial_low_zone = point.nav <= start_nav * (1 + initial_low_band_percent / 100)
+    has_buy_opportunity = (
+        not has_position
+        or in_initial_low_zone
+        or drop >= 0
+        or peak_drawdown >= opportunity_drawdown_percent
+    )
+    if not has_buy_opportunity:
+        return
+
+    steps = max(math.floor(drop / drop_step_percent), 0)
+    amount = base_amount * min(multiplier ** steps, max_multiplier)
+    amount = min(amount, remaining_budget)
+
+    reason = "计划定投" if steps <= 0 else f"低于持仓成本{round(drop, 2)}%，翻倍定投"
+    if _buy(point.date, point.nav, amount, state, trades, signals, fee_rate, reason):
+        trade = trades[-1]
+        ctx["double_plan_lots"].append({
+            "date": point.date,
+            "cost": trade["amount"],
+            "shares": abs(trade["share_delta"]),
+            "nav": point.nav,
+        })
+        ctx["double_plan_last_buy_date"] = point.date
+        ctx["double_plan_first_buy_date"] = ctx.get("double_plan_first_buy_date") or point.date
+        ctx["double_plan_first_buy_nav"] = ctx.get("double_plan_first_buy_nav") or point.nav
+        ctx["last_buy_nav"] = point.nav
+
+
+def _double_plan_sell_lot(point, state, trades, signals, fee_rate, lot: Dict[str, Any], reason: str) -> bool:
+    shares = min(lot.get("shares", 0), state["shares"])
+    cost = min(lot.get("cost", 0), state["invested"])
+    if shares <= 0:
+        return False
+    state["invested"] = max(state["invested"] - cost, 0)
+    return _sell(point.date, point.nav, shares, state, trades, signals, fee_rate, reason)
+
+
+def _double_plan_average_cost_nav(ctx: Dict[str, Any], state: Dict[str, float], fallback_nav: float) -> float:
+    lots = ctx.get("double_plan_lots") or []
+    total_shares = sum(lot.get("shares", 0) for lot in lots)
+    total_cost = sum(lot.get("cost", 0) for lot in lots)
+    if total_shares > 0:
+        return total_cost / total_shares
+    if state["shares"] > 0:
+        return state["invested"] / state["shares"]
+    return fallback_nav
+
+
+def _elapsed_plan_years(start_date: str, current_date: str) -> int:
+    days = (datetime.strptime(current_date, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days
+    return max(math.floor(days / 365.25) + 1, 1)
+
+
+def _double_plan_target_value(target_type: str, target_percent: float) -> float:
+    if target_type == "double":
+        return 100
+    return target_percent
+
+
+def _double_plan_target_status(point, state, ctx, target_type: str, target_percent: float) -> Tuple[bool, float]:
+    invested = state["invested"]
+    value = state["shares"] * point.nav
+    return_rate = (value - invested) / invested * 100 if invested > 0 else 0
+    if target_type == "double":
+        return return_rate >= 100, return_rate
+    if target_type == "annual_return":
+        lots = ctx.get("double_plan_lots") or []
+        annual_returns = []
+        for lot in lots:
+            days = max((datetime.strptime(point.date, "%Y-%m-%d") - datetime.strptime(lot["date"], "%Y-%m-%d")).days, 1)
+            years = days / 365.25
+            lot_return = (lot["shares"] * point.nav - lot["cost"]) / lot["cost"] * 100 if lot["cost"] > 0 else 0
+            annual = ((1 + lot_return / 100) ** (1 / years) - 1) * 100 if lot_return > -100 else -100
+            annual_returns.append(annual)
+        if annual_returns:
+            metric = min(annual_returns)
+            return metric >= target_percent, metric
+        return False, 0
+    if target_type == "absolute_return":
+        return return_rate >= target_percent, return_rate
+    return return_rate >= 100, return_rate
 
 
 def _strategy_grid(index, point, state, trades, signals, fee_rate, params, ctx):

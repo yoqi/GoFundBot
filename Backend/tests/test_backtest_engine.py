@@ -1,9 +1,19 @@
+from datetime import datetime, timedelta
+
 from services.backtest_engine import run_strategy_backtest
 
 
 def nav_series(values):
     return [
         {"date": f"2024-01-{idx + 1:02d}", "net_worth": value}
+        for idx, value in enumerate(values)
+    ]
+
+
+def daily_nav_series(values, start="2024-01-01"):
+    start_date = datetime.strptime(start, "%Y-%m-%d")
+    return [
+        {"date": (start_date + timedelta(days=idx)).strftime("%Y-%m-%d"), "net_worth": value}
         for idx, value in enumerate(values)
     ]
 
@@ -41,6 +51,150 @@ def test_double_down_increases_amount_after_drop():
     buy_amounts = [trade["amount"] for trade in result["trades"] if trade["type"] == "buy"]
     assert buy_amounts[0] == 1000
     assert max(buy_amounts) > 1000
+
+
+def test_double_down_plan_uses_twelve_monthly_slices_and_min_six_day_interval():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0] * 20),
+        "double_down",
+        capital=12000,
+        fee_rate=0,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 1,
+            "future_years": 0,
+            "target_type": "double",
+        },
+    )
+
+    buy_trades = [trade for trade in result["trades"] if trade["type"] == "buy"]
+    assert [trade["amount"] for trade in buy_trades[:3]] == [1000, 1000, 1000]
+    assert [trade["date"] for trade in buy_trades[:3]] == ["2024-01-01", "2024-01-07", "2024-01-13"]
+
+
+def test_double_down_plan_regular_buy_can_happen_above_cost_and_ignores_fee():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0] + [1.05] * 12),
+        "double_down",
+        capital=12000,
+        fee_rate=0.0015,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 12,
+            "future_years": 0,
+            "target_type": "double",
+        },
+    )
+
+    buy_trades = [trade for trade in result["trades"] if trade["type"] == "buy"]
+    assert [trade["date"] for trade in buy_trades[:2]] == ["2024-01-01", "2024-01-13"]
+    assert buy_trades[0]["fee"] == 0
+    assert buy_trades[0]["return"] == 0
+
+
+def test_double_down_plan_min_interval_does_not_force_buy_without_opportunity():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0] + [1.2] * 20),
+        "double_down",
+        capital=12000,
+        fee_rate=0,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 6,
+            "future_years": 0,
+            "target_type": "double",
+            "opportunity_drawdown_percent": 12,
+            "initial_low_band_percent": 8,
+            "lot_take_profit_percent": 0,
+        },
+    )
+
+    buy_trades = [trade for trade in result["trades"] if trade["type"] == "buy"]
+    assert len(buy_trades) == 1
+
+
+def test_double_down_plan_sells_latest_profitable_lot_and_pauses_buying():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0] + [0.99] * 5 + [0.94] + [0.95] * 5 + [1.05, 1.04, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        "double_down",
+        capital=12000,
+        fee_rate=0,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 1,
+            "future_years": 0,
+            "target_type": "double",
+            "lot_take_profit_percent": 10,
+            "restart_after_sell_drop_percent": 3,
+        },
+    )
+
+    trades = result["trades"]
+    sell_trade = next(trade for trade in trades if trade["type"] == "sell")
+    assert sell_trade["status"] == "牛市卖出"
+    assert sell_trade["cost"] == 1000
+    assert sum(1 for trade in trades if trade["type"] == "sell") == 1
+    assert not any(trade["type"] == "buy" and trade["date"] in {"2024-01-14"} for trade in trades)
+    assert any(trade["type"] == "buy" and trade["date"] == "2024-01-19" for trade in trades)
+
+
+def test_double_down_plan_does_not_chain_sell_while_paused():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0] + [0.96] * 5 + [0.9] + [1.08] * 10),
+        "double_down",
+        capital=12000,
+        fee_rate=0,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 6,
+            "future_years": 0,
+            "target_type": "double",
+            "lot_take_profit_percent": 10,
+            "restart_after_sell_drop_percent": 3,
+        },
+    )
+
+    sell_trades = [trade for trade in result["trades"] if trade["type"] == "sell"]
+    assert len(sell_trades) == 1
+    assert sell_trades[0]["status"] == "牛市卖出"
+
+
+def test_double_down_plan_adds_new_annual_budget_after_one_year():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0] * 380),
+        "double_down",
+        capital=24000,
+        fee_rate=0,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 6,
+            "future_years": 0,
+            "target_type": "double",
+        },
+    )
+
+    buy_trades = [trade for trade in result["trades"] if trade["type"] == "buy"]
+    assert sum(trade["amount"] for trade in buy_trades if trade["date"] < "2025-01-01") == 12000
+    assert any(trade["date"] >= "2025-01-01" for trade in buy_trades)
+
+
+def test_double_down_plan_fallback_sell_requires_target_still_met():
+    result = run_strategy_backtest(
+        daily_nav_series([1.0, 1.2, 1.08]),
+        "double_down",
+        capital=12000,
+        fee_rate=0,
+        params={
+            "annual_plan_capital": 12000,
+            "min_trade_interval_days": 6,
+            "future_years": 0,
+            "target_type": "absolute_return",
+            "target_percent": 20,
+            "sell_drawdown_percent": 10,
+        },
+    )
+
+    assert not any(trade["type"] == "sell" for trade in result["trades"])
 
 
 def test_grid_buys_on_drop_and_sells_on_rebound():

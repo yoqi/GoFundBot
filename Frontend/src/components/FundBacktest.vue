@@ -145,7 +145,7 @@
             <span v-else>{{ activeStrategy?.desc }}</span>
           </div>
 
-          <label class="field">
+          <label class="field" v-if="selectedStrategy !== 'double_down'">
             <span>总计划资金</span>
             <div class="input-unit">
               <input type="number" v-model.number="form.capital" min="1" step="1000" />
@@ -153,7 +153,7 @@
             </div>
           </label>
 
-          <div class="field-row">
+          <div class="field-row" v-if="selectedStrategy !== 'double_down'">
             <label class="field">
               <span>起始日期</span>
               <input type="date" v-model="form.startDate" :max="form.endDate" />
@@ -164,7 +164,7 @@
             </label>
           </div>
 
-          <label class="field" v-if="selectedStrategy !== 'target_profit_plan'">
+          <label class="field" v-if="selectedStrategy !== 'target_profit_plan' && selectedStrategy !== 'double_down'">
             <span>申购/赎回费率</span>
             <div class="input-unit">
               <input type="number" v-model.number="form.feeRate" min="0" max="2" step="0.01" />
@@ -295,16 +295,63 @@
           </template>
 
           <template v-else-if="selectedStrategy === 'double_down'">
-            <money-field label="基础买入金额" v-model="form.baseAmount" />
-            <percent-field label="下跌触发阈值" v-model="form.dropTriggerPercent" />
+            <money-field label="每年计划资金" v-model="form.doubleAnnualCapital" />
             <label class="field">
-              <span>翻倍倍数</span>
-              <input type="number" v-model.number="form.multiplier" min="1" step="0.5" />
+              <span>定投最小间隔</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.doubleMinIntervalDays" min="6" step="1" />
+                <b>天</b>
+              </div>
             </label>
             <label class="field">
-              <span>最大倍数</span>
-              <input type="number" v-model.number="form.maxMultiplier" min="1" step="1" />
+              <span>最多可以使用未来</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.doubleFutureYears" min="0" step="1" />
+                <b>年</b>
+              </div>
             </label>
+
+            <div class="start-rule double-targets">
+              <strong>投资目标</strong>
+              <label>
+                <input type="radio" value="double" v-model="form.doubleTargetType" />
+                <span>达到翻倍</span>
+              </label>
+              <label>
+                <input type="radio" value="annual_return" v-model="form.doubleTargetType" />
+                <span>年化收益大于</span>
+              </label>
+              <percent-field v-if="form.doubleTargetType === 'annual_return'" label="" v-model="form.doubleTargetPercent" />
+              <label>
+                <input type="radio" value="absolute_return" v-model="form.doubleTargetType" />
+                <span>绝对涨幅大于</span>
+              </label>
+              <percent-field v-if="form.doubleTargetType === 'absolute_return'" label="" v-model="form.doubleTargetPercent" />
+            </div>
+
+            <label class="field">
+              <span>达到目标后，且回落</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.doubleSellDrawdownPercent" min="0" step="0.1" />
+                <b>%</b>
+              </div>
+            </label>
+
+            <label class="check-field">
+              <input type="checkbox" v-model="form.doubleDynamicDrawdown" />
+              <span>动态增加回落值</span>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span>起始日期</span>
+                <input type="date" v-model="form.startDate" :max="form.endDate" />
+              </label>
+              <label class="field">
+                <span>结束日期</span>
+                <input type="date" v-model="form.endDate" :min="form.startDate" :max="today" />
+              </label>
+            </div>
           </template>
 
           <template v-else-if="selectedStrategy === 'grid'">
@@ -498,7 +545,7 @@ export default {
     const strategyCards = [
       { key: 'target_profit_plan', name: '定盈计划回测', icon: '盈', desc: '跌时吸筹、涨到目标落袋，支持手工、小鱼和大鱼计划。' },
       { key: 'fixed_amount', name: '定额计划回测', icon: '￥', desc: '按固定金额和周期持续买入。' },
-      { key: 'double_down', name: '翻倍定投回测', icon: '◎', desc: '下跌达到阈值后放大下一笔买入。' },
+      { key: 'double_down', name: '翻倍定投回测', icon: '◎', desc: '按年度资金计划低位定投，达成目标后可等待回落再止盈。' },
       { key: 'grid', name: '网格计划回测', icon: '#', desc: '跌破网格买入，反弹达到阈值卖出。' },
       { key: 'ma_timing', name: '均线定投回测', icon: 'MA', desc: '根据 MA10/MA20/MA60 判断加仓和减仓。' },
       { key: 'trend_timing', name: '趋势定投回测', icon: '↗', desc: '根据近 N 日趋势强弱调整买卖。' },
@@ -579,6 +626,13 @@ export default {
         dropTriggerPercent: 3,
         multiplier: 2,
         maxMultiplier: 4,
+        doubleAnnualCapital: 12000,
+        doubleMinIntervalDays: 12,
+        doubleFutureYears: 2,
+        doubleTargetType: 'double',
+        doubleTargetPercent: 20,
+        doubleSellDrawdownPercent: 0,
+        doubleDynamicDrawdown: false,
         gridStepPercent: 3,
         sellProfitPercent: 5,
         maxConsecutiveSell: 2,
@@ -696,12 +750,20 @@ export default {
       }
       if (selectedStrategy.value === 'double_down') {
         return {
-          frequency: 'monthly',
-          base_amount: f.baseAmount,
-          drop_trigger_percent: f.dropTriggerPercent,
-          multiplier: f.multiplier,
-          max_multiplier: f.maxMultiplier,
-          start_condition: 'immediate'
+          annual_plan_capital: f.doubleAnnualCapital,
+          min_trade_interval_days: Math.max(Number(f.doubleMinIntervalDays) || 12, 6),
+          future_years: Math.max(Number(f.doubleFutureYears) || 0, 0),
+          target_type: f.doubleTargetType,
+          target_percent: f.doubleTargetPercent,
+          sell_drawdown_percent: f.doubleSellDrawdownPercent,
+          dynamic_drawdown: f.doubleDynamicDrawdown,
+          multiplier: 2,
+          max_multiplier: 2,
+          drop_step_percent: 5,
+          opportunity_drawdown_percent: 12,
+          initial_low_band_percent: 8,
+          lot_take_profit_percent: 10,
+          restart_after_sell_drop_percent: 3
         }
       }
       if (selectedStrategy.value === 'grid') {
@@ -838,13 +900,16 @@ export default {
       result.value = null
       currentPage.value = 1
       try {
+        const requestCapital = selectedStrategy.value === 'double_down'
+          ? getDoublePlanTotalCapital()
+          : form.value.capital
         const response = await backtestAPI.runStrategy({
           fund_code: currentFundCode.value,
           strategy_type: selectedStrategy.value,
           start_date: form.value.startDate,
           end_date: form.value.endDate,
-          capital: form.value.capital,
-          fee_rate: form.value.feeRate,
+          capital: requestCapital,
+          fee_rate: selectedStrategy.value === 'double_down' ? 0 : form.value.feeRate,
           params: buildParams()
         })
         result.value = response.data
@@ -853,6 +918,19 @@ export default {
       } finally {
         loading.value = false
       }
+    }
+
+    function getDoublePlanTotalCapital() {
+      const start = new Date(form.value.startDate)
+      const end = new Date(form.value.endDate)
+      const annual = Math.max(Number(form.value.doubleAnnualCapital) || 0, 0)
+      const futureYears = Math.max(Number(form.value.doubleFutureYears) || 0, 0)
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || annual <= 0) {
+        return form.value.capital
+      }
+      const diffDays = Math.max((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000), 0)
+      const elapsedYears = Math.max(Math.floor(diffDays / 365.25) + 1, 1)
+      return annual * (elapsedYears + futureYears)
     }
 
     function initChart() {
@@ -897,29 +975,35 @@ export default {
       ]
 
       if (chartType.value === 'asset') {
+        const investedColor = '#64748b'
+        const assetColor = '#1677ff'
         series.push(
           {
             name: '累计投入',
             type: 'line',
             data: timeline.map(item => item.invested),
             yAxisIndex: 1,
-            lineStyle: { color: '#64748b', width: 1.5 }
+            lineStyle: { color: investedColor, width: 1.5 },
+            itemStyle: { color: investedColor }
           },
           {
             name: '总资产',
             type: 'line',
             data: timeline.map(item => item.total_asset),
             yAxisIndex: 1,
-            lineStyle: { color: '#1677ff', width: 2 }
+            lineStyle: { color: assetColor, width: 2 },
+            itemStyle: { color: assetColor }
           }
         )
       } else {
+        const returnColor = '#1677ff'
         series.push({
           name: '累计收益率',
           type: 'line',
           data: timeline.map(item => item.return_rate),
           yAxisIndex: 1,
-          lineStyle: { color: '#1677ff', width: 2 }
+          lineStyle: { color: returnColor, width: 2 },
+          itemStyle: { color: returnColor }
         })
       }
 
@@ -1564,6 +1648,35 @@ export default {
 .start-rule span {
   font-size: 13px;
   font-weight: 600;
+}
+
+.double-targets {
+  gap: 8px;
+}
+
+.double-targets :deep(.field) {
+  margin: -4px 0 4px 24px;
+}
+
+.double-targets :deep(.field > span) {
+  display: none;
+}
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.check-field input {
+  width: 15px;
+  height: 15px;
+  accent-color: #1677ff;
 }
 
 .input-unit,
