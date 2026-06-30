@@ -37,8 +37,12 @@ def run_strategy_backtest(
         "two_eight_rotation",
         "buy_hold",
         "kpi_analysis",
+        "target_profit_plan",
     }:
         return {"error": f"Unsupported strategy_type: {strategy_type}"}
+
+    if strategy_type == "target_profit_plan":
+        return _run_target_profit_plan(points, capital, fee_rate, params)
 
     state = _new_state(capital)
     timeline: List[Dict[str, Any]] = []
@@ -486,6 +490,348 @@ def _strategy_buy_hold(index, point, state, trades, signals, fee_rate, params):
         return
     amount = _num(params, "amount", state["cash"])
     _buy(point.date, point.nav, amount, state, trades, signals, fee_rate, "买入持有基准")
+
+
+def _run_target_profit_plan(points: List[NavPoint], capital: float, fee_rate: float, params: Dict[str, Any]) -> Dict[str, Any]:
+    plan = _target_profit_defaults(capital, params)
+    ma_cache = _moving_averages(points, [10, 60])
+    cash = max(float(capital or 0), 0)
+    lots: List[Dict[str, Any]] = []
+    timeline: List[Dict[str, Any]] = []
+    trades: List[Dict[str, Any]] = []
+    signals: List[Dict[str, Any]] = []
+    first_trade_date: Optional[str] = None
+    last_trade_date: Optional[str] = None
+    last_trade_nav: Optional[float] = None
+    next_buy_amount = plan["buy_amount"]
+    consecutive_buy_count = 0
+    consecutive_sell_count = 0
+    active = False
+    completed_cycles = 0
+    stopped = False
+    pending_restart_after: Optional[str] = None
+    cycle_start_cash = cash
+
+    def current_shares() -> float:
+        return sum(lot["shares"] for lot in lots)
+
+    def current_cost() -> float:
+        return sum(lot["cost"] for lot in lots)
+
+    def current_value(nav: float) -> float:
+        return current_shares() * nav
+
+    def can_trade(date_text: str) -> bool:
+        if not last_trade_date:
+            return True
+        days = (datetime.strptime(date_text, "%Y-%m-%d") - datetime.strptime(last_trade_date, "%Y-%m-%d")).days
+        return days >= plan["min_trade_interval_days"]
+
+    def append_trade(
+        date: str,
+        trade_type: str,
+        amount: float,
+        share_delta: float,
+        nav: float,
+        reason: str,
+        fee: float = 0.0,
+        cost_basis_override: Optional[float] = None,
+    ) -> None:
+        nonlocal first_trade_date, last_trade_date, last_trade_nav
+        if first_trade_date is None:
+            first_trade_date = date
+        last_trade_date = date
+        last_trade_nav = nav
+        total_asset = cash + current_value(nav)
+        cost = current_cost() if cost_basis_override is None else cost_basis_override
+        total_return = total_asset - cycle_start_cash
+        trades.append({
+            "index": len(trades) + 1,
+            "date": date,
+            "type": trade_type,
+            "type_label": "买入" if trade_type == "buy" else "卖出",
+            "amount": round(amount, 2),
+            "fee": round(fee, 2),
+            "share_delta": round(share_delta, 4),
+            "holding_shares": round(current_shares(), 4),
+            "cost": round(cost, 2),
+            "nav": round(nav, 4),
+            "acc_nav": round(nav, 4),
+            "value": round(current_value(nav), 2),
+            "cash": round(cash, 2),
+            "total_asset": round(total_asset, 2),
+            "return": round(total_return, 2),
+            "return_rate": round((total_return / cost * 100) if cost > 0 else 0, 2),
+            "status": reason,
+        })
+        signals.append({"date": date, "type": trade_type, "nav": round(nav, 4), "reason": reason})
+
+    def buy(date: str, nav: float, desired_amount: float, reason: str) -> bool:
+        nonlocal cash
+        amount = min(max(desired_amount, 0), cash)
+        if amount <= 0 or nav <= 0:
+            return False
+        fee = 0.0
+        shares = amount / nav
+        cash -= amount
+        lots.append({"date": date, "nav": nav, "shares": shares, "cost": amount})
+        append_trade(date, "buy", amount, shares, nav, reason, fee)
+        return True
+
+    def sell_lot(date: str, nav: float, lot: Dict[str, Any], reason: str) -> bool:
+        nonlocal cash
+        if lot not in lots:
+            return False
+        gross = lot["shares"] * nav
+        fee = 0.0
+        amount = gross - fee
+        cash += amount
+        lots.remove(lot)
+        append_trade(date, "sell", amount, -lot["shares"], nav, reason, fee)
+        return True
+
+    def sell_all(date: str, nav: float, reason: str) -> bool:
+        nonlocal cash
+        shares = current_shares()
+        if shares <= 0:
+            return False
+        cost_before_sell = current_cost()
+        gross = shares * nav
+        fee = 0.0
+        amount = gross - fee
+        cash += amount
+        lots.clear()
+        append_trade(date, "sell", amount, -shares, nav, reason, fee, cost_before_sell)
+        return True
+
+    for index, point in enumerate(points):
+        date = point.date
+        nav = point.nav
+        traded = False
+
+        if pending_restart_after and date != pending_restart_after and not stopped:
+            active = True
+            cycle_start_cash = cash
+            if buy(date, nav, plan["buy_amount"], "自动开启下一期定盈计划"):
+                traded = True
+                consecutive_buy_count = 1
+                consecutive_sell_count = 0
+                next_buy_amount = plan["buy_amount"] * (1 + plan["buy_increase_percent"] / 100)
+                pending_restart_after = None
+
+        if not active and not stopped and _target_profit_start_allowed(index, nav, ma_cache, plan):
+            active = True
+            traded = buy(date, nav, next_buy_amount, "定盈计划启动买入")
+            consecutive_buy_count = 1 if traded else 0
+            next_buy_amount = plan["buy_amount"] * (1 + plan["buy_increase_percent"] / 100)
+
+        if active and not stopped and lots and can_trade(date):
+            cost = current_cost()
+            cycle_return = cash + current_value(nav) - cycle_start_cash
+            holding_return_rate = cycle_return / cost * 100 if cost > 0 else 0
+
+            if holding_return_rate >= plan["profit_target_percent"]:
+                if sell_all(date, nav, "盈利目标达成，阶段完成"):
+                    traded = True
+                    completed_cycles += 1
+                    consecutive_buy_count = 0
+                    consecutive_sell_count = 0
+                    next_buy_amount = plan["buy_amount"]
+                    active = False
+                    pending_restart_after = date
+                    timeline.append(_target_profit_snapshot(date, nav, cash, lots, capital, traded))
+                    continue
+
+            last_lot = lots[-1] if lots else None
+            if len(lots) > 1 and last_lot and consecutive_sell_count < plan["max_consecutive_sell"]:
+                last_lot_return = (nav - last_lot["nav"]) / last_lot["nav"] * 100 if last_lot["nav"] else 0
+                if last_lot_return >= plan["last_buy_rise_sell_percent"]:
+                    if sell_lot(date, nav, last_lot, "最后一笔达到涨幅，卖出回笼"):
+                        traded = True
+                        consecutive_sell_count += 1
+                        consecutive_buy_count = 0
+                        next_buy_amount = plan["buy_amount"]
+
+            if not traded and last_trade_nav:
+                drop_from_last_trade = (last_trade_nav - nav) / last_trade_nav * 100 if last_trade_nav else 0
+                if drop_from_last_trade >= plan["buy_drop_percent"] and current_cost() + next_buy_amount <= capital:
+                    if buy(date, nav, next_buy_amount, "跌幅达标，继续买入"):
+                        traded = True
+                        consecutive_buy_count += 1
+                        consecutive_sell_count = 0
+                        next_buy_amount *= (1 + plan["buy_increase_percent"] / 100)
+
+        timeline.append(_target_profit_snapshot(date, nav, cash, lots, capital, traded))
+
+    summary = _build_target_profit_summary(points, timeline, trades, capital, first_trade_date, last_trade_date, completed_cycles)
+    return {
+        "summary": summary,
+        "timeline": timeline,
+        "trades": trades,
+        "signals": signals,
+        "metrics": {
+            "holding_days": summary["holding_days"],
+            "max_cost": summary["max_cost"],
+            "cumulative_return": summary["total_return"],
+            "average_invested": summary["average_invested"],
+            "capital_return_rate": summary["return_rate"],
+            "annual_return_rate": summary["annual_return"],
+            "plan_return_rate": summary["plan_return_rate"],
+            "plan_annual_return": summary["plan_annual_return"],
+            "average_capital_usage": summary["capital_usage_rate"],
+            "buy_count": summary["buy_count"],
+            "sell_count": summary["sell_count"],
+        },
+        "strategy_config": {
+            "strategy_type": "target_profit_plan",
+            "capital": round(capital, 2),
+            "fee_rate": round(fee_rate * 100, 4),
+            "params": params,
+            "resolved_params": plan,
+        },
+    }
+
+
+def _target_profit_defaults(capital: float, params: Dict[str, Any]) -> Dict[str, Any]:
+    plan_type = params.get("plan_type") or "manual"
+    if plan_type == "auto_big":
+        defaults = {
+            "buy_amount": capital / 5,
+            "profit_target_percent": 20,
+            "buy_drop_percent": 5,
+            "buy_increase_percent": 20,
+            "last_buy_rise_sell_percent": 10,
+            "max_consecutive_sell": 2,
+        }
+    elif plan_type == "auto_small":
+        defaults = {
+            "buy_amount": capital / 10,
+            "profit_target_percent": 10,
+            "buy_drop_percent": 3,
+            "buy_increase_percent": 10,
+            "last_buy_rise_sell_percent": 6,
+            "max_consecutive_sell": 2,
+        }
+    else:
+        defaults = {
+            "buy_amount": capital / 10,
+            "profit_target_percent": 10,
+            "buy_drop_percent": 3,
+            "buy_increase_percent": 10,
+            "last_buy_rise_sell_percent": 6,
+            "max_consecutive_sell": 2,
+        }
+
+    return {
+        "plan_type": plan_type,
+        "profit_target_percent": _num(params, "profit_target_percent", defaults["profit_target_percent"]),
+        "buy_drop_percent": _num(params, "buy_drop_percent", defaults["buy_drop_percent"]),
+        "buy_amount": _num(params, "buy_amount", defaults["buy_amount"]),
+        "buy_increase_percent": _num(params, "buy_increase_percent", defaults["buy_increase_percent"]),
+        "last_buy_rise_sell_percent": _num(params, "last_buy_rise_sell_percent", defaults["last_buy_rise_sell_percent"]),
+        "max_consecutive_sell": int(_num(params, "max_consecutive_sell", defaults["max_consecutive_sell"])),
+        "start_rule": params.get("start_rule") or "immediate",
+        "start_price": _num(params, "start_price", 0),
+        "min_trade_interval_days": int(_num(params, "min_trade_interval_days", 5)),
+    }
+
+
+def _target_profit_start_allowed(index: int, nav: float, ma_cache: Dict[int, List[Optional[float]]], plan: Dict[str, Any]) -> bool:
+    rule = plan["start_rule"]
+    if rule == "immediate":
+        return index >= 0
+    if rule == "ma10_above_ma60":
+        ma10 = ma_cache.get(10, [None] * (index + 1))[index]
+        ma60 = ma_cache.get(60, [None] * (index + 1))[index]
+        return ma10 is not None and ma60 is not None and ma10 > ma60
+    if rule == "price_gt":
+        return plan["start_price"] > 0 and nav > plan["start_price"]
+    if rule == "price_lt":
+        return plan["start_price"] > 0 and nav < plan["start_price"]
+    return False
+
+
+def _target_profit_snapshot(date: str, nav: float, cash: float, lots: List[Dict[str, Any]], capital: float, traded: bool) -> Dict[str, Any]:
+    shares = sum(lot["shares"] for lot in lots)
+    cost = sum(lot["cost"] for lot in lots)
+    value = shares * nav
+    total_asset = cash + value
+    total_return = total_asset - capital
+    return {
+        "date": date,
+        "nav": round(nav, 4),
+        "invested": round(cost, 2),
+        "cash": round(cash, 2),
+        "shares": round(shares, 4),
+        "value": round(value, 2),
+        "total_asset": round(total_asset, 2),
+        "return": round(total_return, 2),
+        "return_rate": round((value - cost) / cost * 100, 2) if cost > 0 else 0,
+        "is_investment_day": traded,
+        "status": "holding" if shares > 0 else "cash",
+    }
+
+
+def _build_target_profit_summary(
+    points: List[NavPoint],
+    timeline: List[Dict[str, Any]],
+    trades: List[Dict[str, Any]],
+    capital: float,
+    first_trade_date: Optional[str],
+    last_trade_date: Optional[str],
+    completed_cycles: int,
+) -> Dict[str, Any]:
+    final = timeline[-1]
+    if first_trade_date and last_trade_date:
+        days = max((datetime.strptime(last_trade_date, "%Y-%m-%d") - datetime.strptime(first_trade_date, "%Y-%m-%d")).days, 0)
+    else:
+        days = max((datetime.strptime(points[-1].date, "%Y-%m-%d") - datetime.strptime(points[0].date, "%Y-%m-%d")).days, 0)
+    active_timeline = [item for item in timeline if item["invested"] > 0]
+    invested_values = [item["invested"] for item in active_timeline] or [0]
+    average_invested = sum(invested_values) / len(invested_values) if invested_values else 0
+    total_return = final["return"]
+    input_return_rate = total_return / average_invested * 100 if average_invested > 0 else 0
+    plan_return_rate = total_return / capital * 100 if capital > 0 else 0
+    years = days / 365.25 if days > 0 else 0
+    input_annual = input_return_rate / years if years > 0 else 0
+    plan_annual = plan_return_rate / years if years > 0 else 0
+    buy_count = sum(1 for trade in trades if trade["type"] == "buy")
+    sell_count = sum(1 for trade in trades if trade["type"] == "sell")
+    return {
+        "total_capital": round(capital, 2),
+        "total_invested": round(final["invested"], 2),
+        "final_value": round(final["value"], 2),
+        "cash": round(final["cash"], 2),
+        "total_asset": round(final["total_asset"], 2),
+        "total_return": round(total_return, 2),
+        "return_rate": round(input_return_rate, 2),
+        "annual_return": round(input_annual, 2),
+        "plan_return_rate": round(plan_return_rate, 2),
+        "plan_annual_return": round(plan_annual, 2),
+        "max_drawdown": _max_drawdown([item["total_asset"] for item in timeline]),
+        "holding_days": days,
+        "max_cost": round(max(invested_values) if invested_values else 0, 2),
+        "average_invested": round(average_invested, 2),
+        "capital_usage_rate": round(average_invested / capital * 100, 2) if capital > 0 else 0,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "investment_count": buy_count,
+        "trade_count": len(trades),
+        "completed_cycles": completed_cycles,
+        "fee": round(sum(trade["fee"] for trade in trades), 2),
+    }
+
+
+def _max_drawdown(values: List[float]) -> float:
+    if not values:
+        return 0
+    peak = values[0]
+    drawdown = 0
+    for value in values:
+        peak = max(peak, value)
+        if peak > 0:
+            drawdown = min(drawdown, (value - peak) / peak * 100)
+    return round(drawdown, 2)
 
 
 def _rebalance_to_target(date, nav, target_percent, state, trades, signals, fee_rate, reason):

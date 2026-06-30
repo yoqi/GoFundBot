@@ -189,3 +189,119 @@ def test_buy_hold_buys_once():
 
     assert result["summary"]["buy_count"] == 1
     assert result["summary"]["sell_count"] == 0
+
+
+def test_target_profit_plan_buys_more_after_drop_and_sells_last_lot():
+    result = run_strategy_backtest(
+        nav_series([1.0, 1.0, 0.96, 0.92, 0.99, 1.02]),
+        "target_profit_plan",
+        capital=10000,
+        fee_rate=0,
+        params={
+            "plan_type": "manual",
+            "profit_target_percent": 50,
+            "buy_drop_percent": 3,
+            "buy_amount": 1000,
+            "buy_increase_percent": 10,
+            "last_buy_rise_sell_percent": 6,
+            "max_consecutive_sell": 2,
+            "start_rule": "immediate",
+            "min_trade_interval_days": 1,
+        },
+    )
+
+    buy_amounts = [trade["amount"] for trade in result["trades"] if trade["type"] == "buy"]
+    assert buy_amounts[:3] == [1000, 1100, 1210]
+    assert any(trade["type"] == "sell" and "最后一笔" in trade["status"] for trade in result["trades"])
+
+
+def test_target_profit_manual_restarts_after_profit_target():
+    result = run_strategy_backtest(
+        nav_series([1.0, 1.0, 1.12, 1.2, 1.3]),
+        "target_profit_plan",
+        capital=10000,
+        fee_rate=0,
+        params={
+            "plan_type": "manual",
+            "profit_target_percent": 10,
+            "buy_amount": 1000,
+            "start_rule": "immediate",
+            "min_trade_interval_days": 1,
+        },
+    )
+
+    assert any("盈利目标达成" in trade["status"] for trade in result["trades"])
+    completed_trade = next(trade for trade in result["trades"] if "盈利目标达成" in trade["status"])
+    assert completed_trade["cost"] == 1000
+    assert completed_trade["return_rate"] == 12
+    restart_trade = next(trade for trade in result["trades"] if "自动开启下一期" in trade["status"])
+    assert restart_trade["date"] != completed_trade["date"]
+    assert result["summary"]["completed_cycles"] >= 1
+    assert restart_trade["type"] == "buy"
+
+
+def test_target_profit_plan_ignores_fee_for_trade_math():
+    result = run_strategy_backtest(
+        nav_series([1.0, 0.95]),
+        "target_profit_plan",
+        capital=10000,
+        fee_rate=0.0015,
+        params={
+            "plan_type": "manual",
+            "profit_target_percent": 50,
+            "buy_amount": 1000,
+            "start_rule": "immediate",
+            "min_trade_interval_days": 1,
+        },
+    )
+
+    first_trade = result["trades"][0]
+    assert first_trade["share_delta"] == 1000
+    assert first_trade["return"] == 0
+    assert first_trade["fee"] == 0
+
+
+def test_target_profit_single_lot_waits_for_profit_target_after_restart():
+    result = run_strategy_backtest(
+        nav_series([1.0, 1.12, 1.0, 1.06, 1.11]),
+        "target_profit_plan",
+        capital=10000,
+        fee_rate=0,
+        params={
+            "plan_type": "manual",
+            "profit_target_percent": 10,
+            "buy_amount": 1000,
+            "last_buy_rise_sell_percent": 5,
+            "start_rule": "immediate",
+            "min_trade_interval_days": 1,
+        },
+    )
+
+    trades = result["trades"]
+    assert trades[0]["type"] == "buy"
+    assert "盈利目标达成" in trades[1]["status"]
+    assert "自动开启下一期" in trades[2]["status"]
+    assert trades[3]["date"] == "2024-01-05"
+    assert "盈利目标达成" in trades[3]["status"]
+    assert not any(trade["date"] == "2024-01-04" and trade["type"] == "sell" for trade in trades)
+
+
+def test_target_profit_auto_small_restarts_next_cycle():
+    result = run_strategy_backtest(
+        nav_series([1.0, 1.0, 1.12, 1.13, 1.14]),
+        "target_profit_plan",
+        capital=10000,
+        fee_rate=0,
+        params={
+            "plan_type": "auto_small",
+            "start_rule": "immediate",
+            "min_trade_interval_days": 1,
+        },
+    )
+
+    assert result["summary"]["completed_cycles"] >= 1
+    assert any("自动开启下一期" in trade["status"] for trade in result["trades"])
+    completed_trade = next(trade for trade in result["trades"] if "盈利目标达成" in trade["status"])
+    restart_trade = next(trade for trade in result["trades"] if "自动开启下一期" in trade["status"])
+    assert restart_trade["date"] != completed_trade["date"]
+    assert result["summary"]["total_invested"] > 0

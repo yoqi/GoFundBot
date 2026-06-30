@@ -115,7 +115,7 @@
                     <td>{{ trade.date }}</td>
                     <td>{{ trade.type_label }}</td>
                     <td>{{ formatMoney(trade.amount) }}</td>
-                    <td>{{ formatNumber(trade.holding_shares, 4) }}</td>
+                    <td>{{ formatTradeShares(trade.holding_shares) }}</td>
                     <td>{{ formatMoney(trade.cost) }}</td>
                     <td>{{ formatNumber(trade.nav, 4) }}</td>
                     <td>{{ formatNumber(trade.acc_nav, 4) }}</td>
@@ -137,7 +137,12 @@
         <aside class="params-panel">
           <div class="side-title">
             <strong>{{ activeStrategy?.name }}</strong>
-            <span>{{ activeStrategy?.desc }}</span>
+            <template v-if="selectedStrategy === 'target_profit_plan'">
+              <div class="strategy-note title-note">
+                <span>按参考工具口径计算份额和收益，申购/赎回费率不参与定盈买卖记录。阶段达标后，下一交易日自动开启新阶段。</span>
+              </div>
+            </template>
+            <span v-else>{{ activeStrategy?.desc }}</span>
           </div>
 
           <label class="field">
@@ -159,7 +164,7 @@
             </label>
           </div>
 
-          <label class="field">
+          <label class="field" v-if="selectedStrategy !== 'target_profit_plan'">
             <span>申购/赎回费率</span>
             <div class="input-unit">
               <input type="number" v-model.number="form.feeRate" min="0" max="2" step="0.01" />
@@ -167,7 +172,101 @@
             </div>
           </label>
 
-          <template v-if="selectedStrategy === 'fixed_amount'">
+          <template v-if="selectedStrategy === 'target_profit_plan'">
+            <div class="target-mode">
+              <label :class="['mode-option', { active: form.targetPlanType === 'manual' }]">
+                <input type="radio" value="manual" v-model="form.targetPlanType" @change="applyTargetPlanPreset" />
+                <span>手工配参数</span>
+              </label>
+              <label :class="['mode-option', { active: form.targetPlanType === 'auto_small' }]">
+                <input type="radio" value="auto_small" v-model="form.targetPlanType" @change="applyTargetPlanPreset" />
+                <span>自动抓小鱼</span>
+              </label>
+              <label :class="['mode-option', { active: form.targetPlanType === 'auto_big' }]">
+                <input type="radio" value="auto_big" v-model="form.targetPlanType" @change="applyTargetPlanPreset" />
+                <span>自动捞大鱼</span>
+              </label>
+            </div>
+
+            <label class="field target-field">
+              <span>首次买入</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.targetBuyAmount" min="0" step="100" :disabled="targetPlanAuto" />
+                <b>元</b>
+              </div>
+            </label>
+
+            <label class="field target-field">
+              <span>盈利达到</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.profitTargetPercent" min="0" step="0.1" :disabled="targetPlanAuto" />
+                <b>%</b>
+              </div>
+              <em>则卖出全部持仓，并在下一交易日开启新阶段。</em>
+            </label>
+
+            <label class="field target-field">
+              <span>比上一次交易跌幅超过</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.buyDropPercent" min="0" step="0.1" :disabled="targetPlanAuto" />
+                <b>%</b>
+              </div>
+              <em>则继续买入一笔。</em>
+            </label>
+
+            <label class="field target-field">
+              <span>连续买入时，每次增加</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.buyIncreasePercent" min="0" step="0.1" :disabled="targetPlanAuto" />
+                <b>%</b>
+              </div>
+              <em>为 0 时，每次都按首次买入金额执行。</em>
+            </label>
+
+            <label class="field target-field">
+              <span>最后一笔买入，涨幅达到</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.lastBuyRiseSellPercent" min="0" step="0.1" :disabled="targetPlanAuto" />
+                <b>%</b>
+              </div>
+              <em>若当前阶段有多笔持仓，则卖出最后一笔回笼资金。</em>
+            </label>
+
+            <label class="field target-field">
+              <span>最多连续卖出</span>
+              <div class="input-unit">
+                <input type="number" v-model.number="form.targetMaxConsecutiveSell" min="1" step="1" :disabled="targetPlanAuto" />
+                <b>笔</b>
+              </div>
+            </label>
+
+            <div class="start-rule">
+              <strong>首次启动规则</strong>
+              <label>
+                <input type="radio" value="immediate" v-model="form.startRule" />
+                <span>首次无条件启动</span>
+              </label>
+              <label>
+                <input type="radio" value="ma10_above_ma60" v-model="form.startRule" />
+                <span>MA10 在 MA60 之上则启动</span>
+              </label>
+              <label>
+                <input type="radio" value="price_gt" v-model="form.startRule" />
+                <span>价格大于指定净值则启动</span>
+              </label>
+              <label>
+                <input type="radio" value="price_lt" v-model="form.startRule" />
+                <span>价格小于指定净值则启动</span>
+              </label>
+            </div>
+
+            <label class="field target-field" v-if="form.startRule === 'price_gt' || form.startRule === 'price_lt'">
+              <span>启动净值</span>
+              <input type="number" v-model.number="form.startPrice" min="0" step="0.0001" />
+            </label>
+          </template>
+
+          <template v-else-if="selectedStrategy === 'fixed_amount'">
             <label class="field">
               <span>投资频率</span>
               <select v-model="form.frequency">
@@ -331,7 +430,7 @@ import { backtestAPI } from '../services/api'
 import FundSearch from './FundSearch.vue'
 
 const MoneyField = {
-  props: ['modelValue', 'label'],
+  props: ['modelValue', 'label', 'disabled'],
   emits: ['update:modelValue'],
   render() {
     return h('label', { class: 'field' }, [
@@ -342,6 +441,7 @@ const MoneyField = {
           min: '0',
           step: '100',
           value: this.modelValue,
+          disabled: this.disabled,
           onInput: event => this.$emit('update:modelValue', Number(event.target.value))
         }),
         h('b', '元')
@@ -351,7 +451,7 @@ const MoneyField = {
 }
 
 const PercentField = {
-  props: ['modelValue', 'label'],
+  props: ['modelValue', 'label', 'disabled'],
   emits: ['update:modelValue'],
   render() {
     return h('label', { class: 'field' }, [
@@ -362,6 +462,7 @@ const PercentField = {
           min: '0',
           step: '0.1',
           value: this.modelValue,
+          disabled: this.disabled,
           onInput: event => this.$emit('update:modelValue', Number(event.target.value))
         }),
         h('b', '%')
@@ -384,7 +485,7 @@ export default {
     const threeYearsAgo = new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
     const currentFundCode = ref(props.fundCode || '')
     const currentFundName = ref('')
-    const selectedStrategy = ref('fixed_amount')
+    const selectedStrategy = ref('target_profit_plan')
     const loading = ref(false)
     const error = ref('')
     const result = ref(null)
@@ -395,6 +496,7 @@ export default {
     let chartInstance = null
 
     const strategyCards = [
+      { key: 'target_profit_plan', name: '定盈计划回测', icon: '盈', desc: '跌时吸筹、涨到目标落袋，支持手工、小鱼和大鱼计划。' },
       { key: 'fixed_amount', name: '定额计划回测', icon: '￥', desc: '按固定金额和周期持续买入。' },
       { key: 'double_down', name: '翻倍定投回测', icon: '◎', desc: '下跌达到阈值后放大下一笔买入。' },
       { key: 'grid', name: '网格计划回测', icon: '#', desc: '跌破网格买入，反弹达到阈值卖出。' },
@@ -410,11 +512,16 @@ export default {
     ]
 
     const activeStrategy = computed(() => strategyCards.find(item => item.key === selectedStrategy.value))
+    const targetPlanAuto = computed(() => form.value.targetPlanType === 'auto_small' || form.value.targetPlanType === 'auto_big')
 
     const form = ref(defaultForm())
 
     watch(() => props.fundCode, code => {
       if (code) currentFundCode.value = code
+    })
+
+    watch(() => [form.value.capital, form.value.targetPlanType], () => {
+      if (targetPlanAuto.value) applyTargetPlanPreset()
     })
 
     watch(chartType, () => updateChart())
@@ -436,11 +543,13 @@ export default {
         { label: '投入资金收益率', value: formatPercent(s.return_rate), className: returnClass(s.return_rate) },
         { label: '投入资金年化收益率', value: formatPercent(s.annual_return), className: returnClass(s.annual_return) },
         { label: '总计划资金', value: `${formatMoney(s.total_capital)} 元` },
-        { label: '策略收益率', value: formatPercent(s.return_rate), className: returnClass(s.return_rate) },
+        { label: '计划资金收益率', value: formatPercent(s.plan_return_rate ?? s.return_rate), className: returnClass(s.plan_return_rate ?? s.return_rate) },
+        { label: '计划资金年化收益率', value: formatPercent(s.plan_annual_return ?? s.annual_return), className: returnClass(s.plan_annual_return ?? s.annual_return) },
         { label: '最大回撤', value: formatPercent(s.max_drawdown), className: 'negative' },
         { label: '资金平均利用率', value: formatPercent(s.capital_usage_rate) },
         { label: '买入次数', value: `${s.buy_count || 0} 次` },
-        { label: '卖出次数', value: `${s.sell_count || 0} 次` }
+        { label: '卖出次数', value: `${s.sell_count || 0} 次` },
+        { label: '阶段完成次数', value: `${s.completed_cycles || 0} 次` }
       ]
     })
 
@@ -490,7 +599,35 @@ export default {
         strongTargetPercent: 80,
         weakTargetPercent: 20,
         switchThresholdPercent: 1.5,
-        buyHoldAmount: 10000
+        buyHoldAmount: 10000,
+        targetPlanType: 'manual',
+        profitTargetPercent: 10,
+        buyDropPercent: 3,
+        targetBuyAmount: 1000,
+        buyIncreasePercent: 10,
+        lastBuyRiseSellPercent: 6,
+        targetMaxConsecutiveSell: 2,
+        startRule: 'immediate',
+        startPrice: 1,
+        minTradeIntervalDays: 5
+      }
+    }
+
+    function applyTargetPlanPreset() {
+      if (form.value.targetPlanType === 'auto_small') {
+        form.value.targetBuyAmount = Math.round(form.value.capital / 10)
+        form.value.profitTargetPercent = 10
+        form.value.buyDropPercent = 3
+        form.value.buyIncreasePercent = 10
+        form.value.lastBuyRiseSellPercent = 6
+        form.value.targetMaxConsecutiveSell = 2
+      } else if (form.value.targetPlanType === 'auto_big') {
+        form.value.targetBuyAmount = Math.round(form.value.capital / 5)
+        form.value.profitTargetPercent = 20
+        form.value.buyDropPercent = 5
+        form.value.buyIncreasePercent = 20
+        form.value.lastBuyRiseSellPercent = 10
+        form.value.targetMaxConsecutiveSell = 2
       }
     }
 
@@ -532,6 +669,20 @@ export default {
 
     function buildParams() {
       const f = form.value
+      if (selectedStrategy.value === 'target_profit_plan') {
+        return {
+          plan_type: f.targetPlanType,
+          profit_target_percent: f.profitTargetPercent,
+          buy_drop_percent: f.buyDropPercent,
+          buy_amount: f.targetBuyAmount,
+          buy_increase_percent: f.buyIncreasePercent,
+          last_buy_rise_sell_percent: f.lastBuyRiseSellPercent,
+          max_consecutive_sell: f.targetMaxConsecutiveSell,
+          start_rule: f.startRule,
+          start_price: f.startPrice,
+          min_trade_interval_days: f.minTradeIntervalDays
+        }
+      }
       if (selectedStrategy.value === 'fixed_amount') {
         return {
           frequency: f.frequency,
@@ -800,6 +951,12 @@ export default {
       return Number.isFinite(num) ? num.toFixed(digits) : '--'
     }
 
+    function formatTradeShares(value) {
+      const num = Number(value)
+      if (!Number.isFinite(num)) return '--'
+      return activeStrategy.value?.key === 'target_profit_plan' ? String(Math.floor(num)) : num.toFixed(4)
+    }
+
     function formatPercent(value) {
       const num = Number(value)
       return Number.isFinite(num) ? `${num.toFixed(2)}%` : '--'
@@ -831,6 +988,7 @@ export default {
       selectedStrategy,
       activeStrategy,
       strategyCards,
+      targetPlanAuto,
       form,
       loading,
       error,
@@ -843,6 +1001,7 @@ export default {
       totalPages,
       handleStrategyCard,
       exportTrades,
+      applyTargetPlanPreset,
       selectStrategy,
       handleFundSelected,
       changeFund,
@@ -850,6 +1009,7 @@ export default {
       runBacktest,
       formatMoney,
       formatNumber,
+      formatTradeShares,
       formatPercent,
       returnClass
     }
@@ -1291,6 +1451,119 @@ export default {
   outline: none;
   border-color: #1677ff;
   box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
+}
+
+.field input:disabled,
+:deep(.field input:disabled),
+.field select:disabled,
+:deep(.field select:disabled) {
+  background: #f8fafc;
+  color: #64748b;
+  cursor: not-allowed;
+}
+
+.strategy-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.strategy-note strong {
+  font-size: 13px;
+}
+
+.strategy-note span {
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.title-note {
+  margin: 12px 0 0;
+}
+
+.side-title .title-note strong {
+  color: #1e3a8a;
+  font-size: 13px;
+}
+
+.side-title .title-note span {
+  margin-top: 0;
+  color: #31559a;
+  line-height: 1.6;
+}
+
+.target-mode {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.mode-option,
+.start-rule label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #1f2937;
+}
+
+.mode-option {
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #fff;
+  transition: all 0.18s;
+}
+
+.mode-option.active {
+  border-color: #1677ff;
+  background: #f0f7ff;
+  color: #0958d9;
+  font-weight: 700;
+}
+
+.mode-option input,
+.start-rule input {
+  width: 15px;
+  height: 15px;
+  accent-color: #1677ff;
+  flex: 0 0 auto;
+}
+
+.target-field {
+  margin-bottom: 16px;
+}
+
+.target-field em {
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.start-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.start-rule strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.start-rule span {
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .input-unit,
