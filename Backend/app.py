@@ -13,6 +13,7 @@ from data_service_routes import data_service_bp
 from services.data_service_client import DataServiceClient, DataServiceError, get_data_service_client
 from services.data_service_legacy_mapper import map_data_service_detail_to_legacy
 from services.backtest_engine import run_strategy_backtest
+from services.smart_screening_engine import build_smart_screening_result
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc, and_, or_, func, cast, Float
 from datetime import datetime, timedelta
@@ -5591,6 +5592,63 @@ def query_screening_funds():
         'total_pages': math.ceil(total_count / page_size) if total_count > 0 else 0,
         'data': fund_list
     })
+
+
+@app.route('/api/screening/smart-select', methods=['POST'])
+def smart_select_screening_funds():
+    """执行智能基金筛选：排雷、精选、打分并返回优质基金列表。"""
+    data = request.get_json() or {}
+    filters = data.get('filters', {}) or {}
+    top_n = data.get('top_n', 50)
+    page = data.get('page', 1)
+    page_size = data.get('page_size', 20)
+    include_review = bool(filters.get('include_review') or data.get('include_review'))
+
+    db = get_db()
+    query = db.query(
+        FundBasicInfo,
+        FundRiskMetrics,
+        FundScreeningRank,
+        FundTrend,
+        FundExtraData,
+        FundIndustryTag,
+    ).outerjoin(
+        FundRiskMetrics, FundBasicInfo.fund_code == FundRiskMetrics.fund_code
+    ).outerjoin(
+        FundScreeningRank, FundBasicInfo.fund_code == FundScreeningRank.fund_code
+    ).outerjoin(
+        FundTrend, FundBasicInfo.fund_code == FundTrend.fund_code
+    ).outerjoin(
+        FundExtraData, FundBasicInfo.fund_code == FundExtraData.fund_code
+    ).outerjoin(
+        FundIndustryTag, FundBasicInfo.fund_code == FundIndustryTag.fund_code
+    )
+
+    fund_types = [str(item).strip() for item in filters.get('fund_types', []) if str(item).strip()]
+    if fund_types:
+        query = query.filter(or_(*[FundBasicInfo.fund_type.like(f'%{fund_type}%') for fund_type in fund_types]))
+
+    keyword = str(filters.get('keyword') or '').strip()
+    if keyword:
+        keyword_like = f'%{keyword}%'
+        query = query.filter(or_(
+            FundBasicInfo.fund_code.like(keyword_like),
+            FundBasicInfo.fund_name.like(keyword_like),
+        ))
+
+    industry_tags = [str(item).strip() for item in filters.get('industry_tags', []) if str(item).strip()]
+    if industry_tags:
+        query = query.filter(FundIndustryTag.industry_tag.in_(industry_tags))
+
+    rows = query.all()
+    result = build_smart_screening_result(
+        rows,
+        top_n=top_n,
+        include_review=include_review,
+        page=page,
+        page_size=page_size,
+    )
+    return jsonify(result)
 
 
 @app.route('/api/screening/strategies', methods=['GET'])

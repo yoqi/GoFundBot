@@ -29,15 +29,22 @@
             >
               🏠 市场大盘
             </button>
-            <button 
-              class="mode-btn" 
+            <button
+              class="mode-btn"
               :class="{ active: viewMode === 'screening' }"
               @click="navigateToMode('screening')"
             >
               🔍 基金筛选
             </button>
-            <button 
-              class="mode-btn" 
+            <button
+              class="mode-btn"
+              :class="{ active: viewMode === 'smart-screening' }"
+              @click="navigateToMode('smart-screening')"
+            >
+              智能筛选
+            </button>
+            <button
+              class="mode-btn"
               :class="{ active: viewMode === 'backtest' }"
               @click="navigateToMode('backtest')"
             >
@@ -106,7 +113,7 @@
       <!-- 其他模式 -->
       <div v-else class="main-layout">
         <!-- 左侧：自选列表 (筛选和估值持仓看板模式不显示) -->
-        <aside class="sidebar-left" v-if="viewMode !== 'screening' && viewMode !== 'portfolio' && viewMode !== 'research'">
+        <aside class="sidebar-left" v-if="viewMode !== 'screening' && viewMode !== 'smart-screening' && viewMode !== 'portfolio' && viewMode !== 'research'">
           <FundWatchlist 
             @view-fund="handleFundSelected" 
             @add-to-compare="handleAddToCompare"
@@ -118,10 +125,18 @@
         </aside>
         
         <!-- 右侧：根据模式显示不同内容 -->
-        <div class="content-area" :class="{ 'full-width': viewMode === 'screening' || viewMode === 'portfolio' || viewMode === 'research' }">
+        <div class="content-area" :class="{ 'full-width': viewMode === 'screening' || viewMode === 'smart-screening' || viewMode === 'portfolio' || viewMode === 'research' }">
           <!-- 筛选模式 -->
           <template v-if="viewMode === 'screening'">
-            <FundScreening 
+            <FundScreening
+              @view-fund="handleScreeningFundView"
+              @add-to-compare="handleAddToCompare"
+            />
+          </template>
+
+          <!-- 智能筛选模式 -->
+          <template v-else-if="viewMode === 'smart-screening'">
+            <FundSmartScreening
               @view-fund="handleScreeningFundView"
               @add-to-compare="handleAddToCompare"
             />
@@ -171,6 +186,7 @@ import FundDetail from './components/FundDetail.vue'
 import FundWatchlist from './components/FundWatchlist.vue'
 import FundComparison from './components/FundComparison.vue'
 import FundScreening from './components/FundScreening.vue'
+import FundSmartScreening from './components/FundSmartScreening.vue'
 import FundBacktest from './components/FundBacktest.vue'
 import FundRealtime from './components/FundRealtime.vue'
 import ResearchDashboard from './components/ResearchDashboard.vue'
@@ -186,6 +202,7 @@ export default {
     FundWatchlist,
     FundComparison,
     FundScreening,
+    FundSmartScreening,
     FundBacktest,
     FundRealtime,
     ResearchDashboard,

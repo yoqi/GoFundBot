@@ -191,7 +191,12 @@ export const screeningAPI = {
   query(params) {
     return api.post('/screening/query', params)
   },
-  
+
+  // 智能筛选优质基金
+  smartSelect(params = {}) {
+    return api.post('/screening/smart-select', params)
+  },
+
   // 获取预设策略列表
   getStrategies() {
     return api.get('/screening/strategies')
