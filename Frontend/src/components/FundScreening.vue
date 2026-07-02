@@ -299,47 +299,32 @@
             <span class="toggle-arrow">{{ showAdvanced ? '▲' : '▼' }}</span>
           </div>
           <div class="advanced-section" v-show="showAdvanced">
-          <div class="adv-grid-simple">
-            <!-- 收益率 -->
-            <div class="adv-item">
-              <label>📈 近1年收益率</label>
-              <div class="adv-range">
-                <input v-model.number="advFilters.return_1y_min" type="number" placeholder="最小值" step="any" class="adv-inp" />
-                <span class="adv-sep">~</span>
-                <input v-model.number="advFilters.return_1y_max" type="number" placeholder="最大值" step="any" class="adv-inp" />
-                <span class="adv-unit">%</span>
+          <div class="adv-group" v-for="group in advancedFilterGroups" :key="group.title">
+            <div class="adv-group-title">{{ group.title }}</div>
+            <div class="adv-grid-simple">
+              <div class="adv-item" v-for="item in group.items" :key="item.key || item.minKey || item.maxKey">
+                <label>{{ item.label }}</label>
+                <label class="adv-check" v-if="item.type === 'checkbox'">
+                  <input v-model="advFilters[item.key]" type="checkbox" />
+                  <span>{{ item.text }}</span>
+                </label>
+                <div class="adv-range" v-else-if="item.type === 'range'">
+                  <input v-model.number="advFilters[item.minKey]" type="number" placeholder="最小值" step="any" class="adv-inp" @keyup.enter="search(true)" />
+                  <span class="adv-sep">~</span>
+                  <input v-model.number="advFilters[item.maxKey]" type="number" placeholder="最大值" step="any" class="adv-inp" @keyup.enter="search(true)" />
+                  <span class="adv-unit" v-if="item.unit">{{ item.unit }}</span>
+                </div>
+                <div class="adv-range" v-else>
+                  <span class="adv-op">{{ item.operator }}</span>
+                  <input v-model.number="advFilters[item.key]" type="number" :placeholder="item.placeholder || ''" step="any" class="adv-inp" @keyup.enter="search(true)" />
+                  <span class="adv-unit" v-if="item.unit">{{ item.unit }}</span>
+                </div>
               </div>
             </div>
-            <!-- 最大回撤 -->
-            <div class="adv-item">
-              <label>📉 最大回撤 ≤</label>
-              <div class="adv-range">
-                <input v-model.number="advFilters.max_drawdown_max" type="number" placeholder="如 20" step="any" class="adv-inp" />
-                <span class="adv-unit">%</span>
-              </div>
-            </div>
-            <!-- 夏普比率 -->
-            <div class="adv-item">
-              <label>⚖️ 夏普比率 ≥</label>
-              <div class="adv-range">
-                <input v-model.number="advFilters.sharpe_min" type="number" placeholder="如 1.5" step="0.1" class="adv-inp" />
-              </div>
-            </div>
-            <!-- 波动率 -->
-            <div class="adv-item">
-              <label>🌊 年化波动率 ≤</label>
-              <div class="adv-range">
-                <input v-model.number="advFilters.volatility_max" type="number" placeholder="如 25" step="any" class="adv-inp" />
-                <span class="adv-unit">%</span>
-              </div>
-            </div>
-            <!-- 卡玛比率 -->
-            <div class="adv-item">
-              <label>🎯 卡玛比率 ≥</label>
-              <div class="adv-range">
-                <input v-model.number="advFilters.calmar_min" type="number" placeholder="如 1" step="0.1" class="adv-inp" />
-              </div>
-            </div>
+          </div>
+          <div class="adv-actions">
+            <button class="btn-reset-adv" @click="resetAdvFilters">清空高级条件</button>
+            <button class="btn-apply-adv" @click="search(true)">应用筛选</button>
           </div>
         </div>
       </div>
@@ -546,13 +531,82 @@ export default {
       }
     }
     const advFilters = reactive({
+      return_1m_min: null,
+      return_1m_max: null,
+      return_3m_min: null,
+      return_3m_max: null,
+      return_6m_min: null,
+      return_6m_max: null,
       return_1y_min: null,
       return_1y_max: null,
-      max_drawdown_max: null,
-      sharpe_min: null,
-      volatility_max: null,
-      calmar_min: null,
+      return_3y_min: null,
+      return_3y_max: null,
+      annual_return_1y_min: null,
+      annual_return_1y_max: null,
+      annual_return_3y_min: null,
+      annual_return_3y_max: null,
+      max_drawdown_3m_max: null,
+      max_drawdown_6m_max: null,
+      max_drawdown_1y_max: null,
+      max_drawdown_3y_max: null,
+      max_drawdown_all_max: null,
+      volatility_1y_max: null,
+      volatility_3y_max: null,
+      sharpe_ratio_1y_min: null,
+      sharpe_ratio_3y_min: null,
+      calmar_ratio_1y_min: null,
+      calmar_ratio_3y_min: null,
+      rank_pct_1m_max: null,
+      rank_pct_3m_max: null,
+      rank_pct_6m_max: null,
+      rank_pct_1y_max: null,
+      rank_pct_2y_max: null,
+      rank_pct_3y_max: null,
+      pass_4433: false,
     })
+
+    const advancedFilterGroups = [
+      {
+        title: '收益表现',
+        items: [
+          { type: 'range', label: '近1月收益率', minKey: 'return_1m_min', maxKey: 'return_1m_max', unit: '%' },
+          { type: 'range', label: '近3月收益率', minKey: 'return_3m_min', maxKey: 'return_3m_max', unit: '%' },
+          { type: 'range', label: '近6月收益率', minKey: 'return_6m_min', maxKey: 'return_6m_max', unit: '%' },
+          { type: 'range', label: '近1年收益率', minKey: 'return_1y_min', maxKey: 'return_1y_max', unit: '%' },
+          { type: 'range', label: '近3年收益率', minKey: 'return_3y_min', maxKey: 'return_3y_max', unit: '%' },
+          { type: 'range', label: '1年年化收益率', minKey: 'annual_return_1y_min', maxKey: 'annual_return_1y_max', unit: '%' },
+          { type: 'range', label: '3年年化收益率', minKey: 'annual_return_3y_min', maxKey: 'annual_return_3y_max', unit: '%' }
+        ]
+      },
+      {
+        title: '风险控制',
+        items: [
+          { label: '近3月最大回撤', key: 'max_drawdown_3m_max', operator: '<=', placeholder: '如 10', unit: '%' },
+          { label: '近6月最大回撤', key: 'max_drawdown_6m_max', operator: '<=', placeholder: '如 15', unit: '%' },
+          { label: '近1年最大回撤', key: 'max_drawdown_1y_max', operator: '<=', placeholder: '如 20', unit: '%' },
+          { label: '近3年最大回撤', key: 'max_drawdown_3y_max', operator: '<=', placeholder: '如 30', unit: '%' },
+          { label: '成立以来最大回撤', key: 'max_drawdown_all_max', operator: '<=', placeholder: '如 40', unit: '%' },
+          { label: '1年波动率', key: 'volatility_1y_max', operator: '<=', placeholder: '如 25', unit: '%' },
+          { label: '3年波动率', key: 'volatility_3y_max', operator: '<=', placeholder: '如 25', unit: '%' },
+          { label: '1年夏普', key: 'sharpe_ratio_1y_min', operator: '>=', placeholder: '如 1.5' },
+          { label: '3年夏普', key: 'sharpe_ratio_3y_min', operator: '>=', placeholder: '如 1.2' },
+          { label: '1年卡玛', key: 'calmar_ratio_1y_min', operator: '>=', placeholder: '如 1' },
+          { label: '3年卡玛', key: 'calmar_ratio_3y_min', operator: '>=', placeholder: '如 1' }
+        ]
+      },
+      {
+        title: '同类排名',
+        items: [
+          { label: '近1月排名百分位', key: 'rank_pct_1m_max', operator: '<=', placeholder: '如 33', unit: '%' },
+          { label: '近3月排名百分位', key: 'rank_pct_3m_max', operator: '<=', placeholder: '如 33', unit: '%' },
+          { label: '近6月排名百分位', key: 'rank_pct_6m_max', operator: '<=', placeholder: '如 33', unit: '%' },
+          { label: '近1年排名百分位', key: 'rank_pct_1y_max', operator: '<=', placeholder: '如 25', unit: '%' },
+          { label: '近2年排名百分位', key: 'rank_pct_2y_max', operator: '<=', placeholder: '如 25', unit: '%' },
+          { label: '近3年排名百分位', key: 'rank_pct_3y_max', operator: '<=', placeholder: '如 25', unit: '%' },
+          { type: 'checkbox', label: '4433法则', key: 'pass_4433', text: '只看通过' }
+        ]
+      }
+    ]
 
     const onTypeSelectChange = () => {}  // deprecated, kept for compat
 
@@ -787,12 +841,19 @@ export default {
     const handlePrimaryIndustryClick = (group) => {
       if (group.tags.length) {
         toggleGroup(group.name)
+      } else {
+        // 没有二级行业的，直接用一级行业名称筛选
+        toggleIndustryTag(group.name)
       }
     }
 
     const isGroupActive = (group) => {
-      return expandedGroups.value.has(group.name) ||
-        group.tags.some(tag => filters.industry_tags.includes(tag.name))
+      if (expandedGroups.value.has(group.name)) return true
+      if (group.tags.length) {
+        return group.tags.some(tag => filters.industry_tags.includes(tag.name))
+      }
+      // 无二级行业的，检查一级行业名是否被直接选中
+      return filters.industry_tags.includes(group.name)
     }
 
     // 展平所有可筛选的二级标签
@@ -935,11 +996,15 @@ export default {
         { field: 'fund_type', title: '类型', width: 130, sortable: true },
         { field: 'return_1m', title: '近1月', width: 100, sortable: true, slots: { default: 'percent' } },
         { field: 'return_3m', title: '近3月', width: 100, sortable: true, slots: { default: 'percent' } },
+        { field: 'return_6m', title: '近6月', width: 100, sortable: true, slots: { default: 'percent' } },
         { field: 'return_1y', title: '近1年', width: 100, sortable: true, slots: { default: 'percent' } },
+        { field: 'return_3y', title: '近3年', width: 100, sortable: true, slots: { default: 'percent' } },
         { field: 'max_drawdown_1y', title: '最大回撤', width: 110, sortable: true, slots: { default: 'drawdown' } },
         { field: 'volatility_1y', title: '波动率', width: 100, sortable: true, slots: { default: 'percent' } },
         { field: 'sharpe_ratio_1y', title: '夏普', width: 90, sortable: true, slots: { default: 'sharpe' } },
+        { field: 'sharpe_ratio_3y', title: '3年夏普', width: 100, sortable: true, slots: { default: 'number' } },
         { field: 'calmar_ratio_1y', title: '卡玛', width: 90, sortable: true, slots: { default: 'calmar' } },
+        { field: 'rank_pct_3y', title: '3年排名%', width: 110, sortable: true, slots: { default: 'number' } },
         { field: 'pass_4433', title: '4433', width: 80, slots: { default: 'pass4433' } },
         { field: 'updated_time', title: '更新时间', minWidth: 160, sortable: true },
         { title: '操作', width: 110, fixed: 'right', slots: { default: 'actions' } }
@@ -1091,15 +1156,11 @@ export default {
       if (filters.fund_types.length) params.fund_types = [...filters.fund_types]
       if (filters.industry_tags.length) params.industry_tags = [...filters.industry_tags]
       if (quickTypeFilter.value) params.quick_fund_type = quickTypeFilter.value
-      // 直接映射 advFilters → 后端字段
-      const map = {
-        return_1y_min: 'return_1y_min', return_1y_max: 'return_1y_max',
-        max_drawdown_max: 'max_drawdown_max', sharpe_min: 'sharpe_min',
-        volatility_max: 'volatility_max', calmar_min: 'calmar_min',
-      }
-      for (const [k, v] of Object.entries(map)) {
-        if (advFilters[k] !== null && advFilters[k] !== '' && Number.isFinite(Number(advFilters[k]))) {
-          params[v] = Number(advFilters[k])
+      for (const [key, value] of Object.entries(advFilters)) {
+        if (typeof value === 'boolean') {
+          if (value) params[key] = value
+        } else if (value !== null && value !== '' && Number.isFinite(Number(value))) {
+          params[key] = Number(value)
         }
       }
       return params
@@ -1110,8 +1171,17 @@ export default {
       filters.keyword = ''
       filters.fund_types = []
       filters.industry_tags = []
-      Object.keys(advFilters).forEach(k => advFilters[k] = null)
+      Object.keys(advFilters).forEach(k => {
+        advFilters[k] = typeof advFilters[k] === 'boolean' ? false : null
+      })
       quickTypeFilter.value = ''
+    }
+
+    // 仅重置高级筛选条件
+    const resetAdvFilters = () => {
+      Object.keys(advFilters).forEach(k => {
+        advFilters[k] = typeof advFilters[k] === 'boolean' ? false : null
+      })
     }
 
     const fetchIndustryTags = async () => {
@@ -1396,6 +1466,7 @@ export default {
       // 高级筛选
       showAdvanced,
       advFilters,
+      advancedFilterGroups,
       onTypeSelectChange,
       searchSuggestions,
       showSearchDropdown,
@@ -1420,6 +1491,7 @@ export default {
       startUpdate,
       stopUpdate,
       resetFilters,
+      resetAdvFilters,
       search,
       changePage,
       onPageSizeChange,
@@ -2636,6 +2708,21 @@ export default {
   border-radius: 8px;
 }
 
+.adv-group {
+  margin-bottom: 16px;
+}
+
+.adv-group:last-child {
+  margin-bottom: 0;
+}
+
+.adv-group-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #374151;
+}
+
 .adv-grid-simple {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -2665,6 +2752,22 @@ export default {
   align-items: center;
   gap: 6px;
   flex: 1;
+}
+
+.adv-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+}
+
+.adv-op {
+  min-width: 24px;
+  color: #6b7280;
+  font-weight: 700;
+  text-align: center;
 }
 
 .adv-inp {
@@ -2697,6 +2800,50 @@ export default {
   font-size: 12px;
   color: #999;
   flex-shrink: 0;
+}
+
+/* 高级筛选操作按钮 */
+.adv-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #eef2f7;
+}
+
+.btn-reset-adv {
+  padding: 8px 16px;
+  background: #fff;
+  color: #6b7280;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-reset-adv:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+  background: #f0f5ff;
+}
+
+.btn-apply-adv {
+  padding: 8px 20px;
+  background: #1677ff;
+  color: #fff;
+  border: 1px solid #1677ff;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-apply-adv:hover {
+  background: #0958d9;
 }
 
 /* ── 自定义类型下拉 ── */
