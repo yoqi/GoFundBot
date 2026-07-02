@@ -16,6 +16,7 @@ from services.backtest_engine import run_strategy_backtest
 from services.smart_screening_engine import build_smart_screening_result
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc, and_, or_, func, cast, Float
+from sqlalchemy.exc import OperationalError
 from datetime import datetime, timedelta
 import json
 import math
@@ -5640,7 +5641,14 @@ def smart_select_screening_funds():
     if industry_tags:
         query = query.filter(FundIndustryTag.industry_tag.in_(industry_tags))
 
-    rows = query.all()
+    try:
+        rows = query.all()
+    except OperationalError as exc:
+        if 'database is locked' not in str(exc).lower():
+            raise
+        time.sleep(0.5)
+        db.rollback()
+        rows = query.all()
     result = build_smart_screening_result(
         rows,
         top_n=top_n,

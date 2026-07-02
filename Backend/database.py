@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from models import Base
 from pathlib import Path
@@ -13,8 +13,20 @@ DATABASE_PATH = PROJECT_ROOT / "Data" / "funds.db"
 # 构造 SQLite URL
 DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False, "timeout": 30},
+    pool_pre_ping=True,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """配置 SQLite 连接以降低读写并发锁冲突。"""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
 
 def migrate_db():
     """数据库迁移：为现有表添加缺失的列"""
